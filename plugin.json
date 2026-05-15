@@ -1,0 +1,119 @@
+{
+  "name": "design-pattern-multiverse",
+  "version": "0.1.0",
+  "description": "AI-powered design pattern discovery and React/Vue code generation for OpenCode",
+  "author": "rUv + gstack (Browser Research Team)",
+  "license": "MIT",
+  "homepage": "https://github.com/browserresearchteam/design-pattern-multiverse",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/browserresearchteam/design-pattern-multiverse.git"
+  },
+  "mcp": {
+    "entry": "npm run mcp-server",
+    "transport": "stdio",
+    "tools": 8,
+    "capabilities": [
+      "search",
+      "discover",
+      "submit",
+      "retrieve",
+      "rate",
+      "generate_code",
+      "stats",
+      "suggest"
+    ]
+  },
+  "tools": [
+    {
+      "name": "search_patterns",
+      "description": "Search the design pattern library",
+      "type": "query"
+    },
+    {
+      "name": "discover_patterns",
+      "description": "Research design patterns from the internet",
+      "type": "action"
+    },
+    {
+      "name": "submit_pattern",
+      "description": "Save a discovered design pattern to the library",
+      "type": "action"
+    },
+    {
+      "name": "get_pattern",
+      "description": "Retrieve detailed pattern information by ID",
+      "type": "query"
+    },
+    {
+      "name": "rate_pattern",
+      "description": "Rate a pattern and provide feedback",
+      "type": "action"
+    },
+    {
+      "name": "generate_code",
+      "description": "Generate React or Vue component code from a pattern",
+      "type": "generator"
+    },
+    {
+      "name": "catalog_stats",
+      "description": "Get library and learning statistics",
+      "type": "query"
+    },
+    {
+      "name": "suggest_patterns",
+      "description": "Get AI-powered pattern suggestions based on context",
+      "type": "query"
+    }
+  ],
+  "keywords": [
+    "design-patterns",
+    "ui-ux",
+    "mcp",
+    "model-context-protocol",
+    "opencode",
+    "ai",
+    "swarm",
+    "multi-agent",
+    "design-system",
+    "pattern-library",
+    "code-generation",
+    "react",
+    "vue",
+    "component-library",
+    "design-research"
+  ],
+  "requirements": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "configuration": {
+    "env": {
+      "DPM_LOG_LEVEL": {
+        "type": "string",
+        "default": "info",
+        "description": "Logging level: debug, info, warn, error"
+      },
+      "DPM_STORAGE_DIR": {
+        "type": "string",
+        "default": "./patterns",
+        "description": "Directory for local pattern storage"
+      },
+      "PIN_API_KEY": {
+        "type": "string",
+        "description": "Pinterest API key (optional)"
+      },
+      "FIGMA_API_KEY": {
+        "type": "string",
+        "description": "Figma access token (optional)"
+      }
+    }
+  },
+  "capabilities": {
+    "offline": true,
+    "storage": true,
+    "learning": true,
+    "vectorSearch": true,
+    "codeGeneration": true
+  }
+}

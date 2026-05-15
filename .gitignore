@@ -1,0 +1,11 @@
+.gstack/
+node_modules/
+dist/
+.env
+*.log
+patterns/
+.tmp/
+.DS_Store
+*.tsbuildinfo
+.test-*/
+coverage/
