@@ -22,18 +22,18 @@
   "bin": {
     "dpm": "dist/cli/index.js",
     "dpm-mcp": "dist/mcp-server/index.js",
-    "dpm-web": "dist/web-server/index.js"
+    "dpm-web": "dist/src/web-server/index.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli/index.js",
-    "web": "node dist/web-server/index.js",
+    "web": "node dist/src/web-server/index.js",
     "dev:web": "tsx src/web-server/index.ts",
     "mcp": "node dist/mcp-server/index.js",
     "mcp-server": "node dist/mcp-server/index.js",
     "mcp-start": "npm run build && npm run mcp-server",
-    "dev": "tsx src/cli/index.ts",
-    "dev:mcp": "tsx src/mcp-server/index.ts",
+    "dev": "tsx cli/index.ts",
+    "dev:mcp": "tsx mcp-server/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

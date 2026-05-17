@@ -43,6 +43,8 @@ import {
 } from '../index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const projectRoot = join(__dirname, '..', '..', '..');
+const publicDir = join(projectRoot, 'src', 'web-server', 'public');
 
 const app = express();
 const PORT = parseInt(process.env.DPM_WEB_PORT ?? '3000', 10);
@@ -50,7 +52,7 @@ const PORT = parseInt(process.env.DPM_WEB_PORT ?? '3000', 10);
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(join(__dirname, 'public')));
+app.use(express.static(publicDir));
 
 // ============================================================
 // Bootstrap
