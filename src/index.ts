@@ -88,3 +88,17 @@ export {
 } from './swarm/pattern/quality-gate.js';
 
 export { hasOpenAIKey, hasMcpAuth, config } from './config.js';
+
+export {
+  validateURL,
+  sanitizeURL,
+} from './validation/url.js';
+
+export {
+  sanitizeXSS,
+  sanitizeSQLInjection,
+  sanitizePathTraversal,
+  sanitizeInput,
+  sanitizeObject,
+  safeBasename,
+} from './validation/sanitize.js';

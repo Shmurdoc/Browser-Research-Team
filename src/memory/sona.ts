@@ -9,8 +9,7 @@
 // ============================================================
 
 import { type DesignPattern, type PatternId } from '../types.js';
-import { addFeedback, getPattern } from '../storage/local.js';
-import { getPatternStorageDir } from '../storage/supabase.js';
+import { addFeedback, getPattern, getPatternStorageDir } from '../storage/local.js';
 import { createLogger_Scoped } from '../logging/index.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

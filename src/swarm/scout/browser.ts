@@ -4,7 +4,7 @@
 //
 // Manages a single Chromium browser instance shared across all scouts.
 // Prevents browser spawn overhead and resource leaks.
-// Auto-closes on process exit.
+// Auto-closes on process exit with proper async handling.
 // ============================================================
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
@@ -15,8 +15,8 @@ const logger = createLogger_Scoped('scout:browser');
 
 let _browser: Browser | null = null;
 let _context: BrowserContext | null = null;
-let _pagePool: Page[] = [];
 let _isShuttingDown = false;
+let _signalHandlersRegistered = false;
 
 /** Get or create the shared browser instance */
 export async function getBrowser(): Promise<Browser> {
@@ -46,15 +46,30 @@ export async function getBrowser(): Promise<Browser> {
     locale: 'en-US',
   });
 
-  // Auto-close on exit
-  process.on('exit', () => { void closeBrowser(); });
-  process.on('SIGTERM', () => { void closeBrowser(); });
-  process.on('SIGINT', () => { void closeBrowser(); });
+  // Register signal handlers ONCE (not on every getBrowser call)
+  if (!_signalHandlersRegistered) {
+    _signalHandlersRegistered = true;
+
+    // 'exit' handler must be synchronous — it cannot do async work
+    process.on('exit', () => {
+      // Best-effort sync cleanup (browser.close is sync-ish in Chromium)
+      if (_browser) {
+        try { _browser.close(); } catch { /* ignore */ }
+      }
+    });
+
+    // SIGTERM/SIGINT can do async cleanup
+    const shutdown = async () => {
+      await closeBrowser();
+    };
+    process.on('SIGTERM', () => { void shutdown(); });
+    process.on('SIGINT', () => { void shutdown(); });
+  }
 
   return _browser;
 }
 
-/** Get a fresh page from the browser pool */
+/** Get a fresh page from the browser context */
 export async function getPage(): Promise<Page> {
   if (!_context) {
     await getBrowser();
@@ -66,7 +81,7 @@ export async function getPage(): Promise<Page> {
   return page;
 }
 
-/** Close a page and release it back to the pool */
+/** Close a page (release back to OS) */
 export async function releasePage(page: Page): Promise<void> {
   try {
     await page.close();
@@ -81,12 +96,6 @@ export async function closeBrowser(): Promise<void> {
   _isShuttingDown = true;
 
   logger.info('Closing browser');
-
-  // Close all pages
-  for (const page of _pagePool) {
-    try { await page.close(); } catch { /* ignore */ }
-  }
-  _pagePool = [];
 
   if (_context) {
     try { await _context.close(); } catch { /* ignore */ }

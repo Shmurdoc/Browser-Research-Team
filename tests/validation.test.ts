@@ -265,11 +265,13 @@ describe('Zod Validation Schemas', () => {
 
 describe('Sanitization Functions', () => {
   describe('sanitizeXSS', () => {
-    it('should remove script tags and their content', () => {
+    it('should escape script tags to prevent XSS', () => {
       const result = sanitizeXSS('<script>alert("xss")</script>');
+      // New implementation escapes all HTML characters — tags become safe text
       expect(result).not.toContain('<script>');
       expect(result).not.toContain('</script>');
-      expect(result).not.toContain('alert');
+      expect(result).toContain('&lt;');
+      expect(result).toContain('&gt;');
     });
 
     it('should remove iframe tags', () => {
@@ -279,9 +281,11 @@ describe('Sanitization Functions', () => {
 
     it('should escape HTML entities for safe text', () => {
       const result = sanitizeXSS('<b>bold</b>');
-      // sanitizeXSS escapes HTML tags rather than removing them
-      expect(result).toContain('&lt;b&gt;');
-      expect(result).toContain('&lt;/b&gt;');
+      // New implementation escapes < > / and other dangerous characters
+      expect(result).toContain('&lt;');
+      expect(result).toContain('&gt;');
+      expect(result).toContain('b');
+      expect(result).toContain('bold');
     });
 
     it('should handle empty string', () => {
@@ -337,31 +341,28 @@ describe('Sanitization Functions', () => {
   });
 
   describe('sanitizePathTraversal', () => {
-    it('should remove ../../../etc/passwd traversal', () => {
-      const result = sanitizePathTraversal('../../../etc/passwd');
-      expect(result).not.toContain('..');
-      expect(result).toBe('etc/passwd');
+    const baseDir = '/safe/base';
+
+    it('should block ../../../etc/passwd traversal', () => {
+      expect(() => sanitizePathTraversal('../../../etc/passwd', baseDir)).toThrow('Path traversal detected');
     });
 
-    it('should remove ..\\\\..\\\\ traversal patterns', () => {
-      const result = sanitizePathTraversal('..\\..\\windows\\system32');
-      expect(result).not.toContain('..');
+    it('should block ..\\..\\ traversal patterns', () => {
+      expect(() => sanitizePathTraversal('..\\..\\windows\\system32', baseDir)).toThrow('Path traversal detected');
     });
 
-    it('should preserve safe path', () => {
-      const result = sanitizePathTraversal('safe/path/file.txt');
-      expect(result).toBe('safe/path/file.txt');
+    it('should allow safe relative path within base', () => {
+      const result = sanitizePathTraversal('subdir/file.txt', baseDir);
+      expect(result).toContain('file.txt');
     });
 
     it('should handle empty string', () => {
-      const result = sanitizePathTraversal('');
+      const result = sanitizePathTraversal('', baseDir);
       expect(result).toBe('');
     });
 
-    it('should remove leading forward slash from absolute paths', () => {
-      const result = sanitizePathTraversal('/etc/passwd');
-      // Should not start with '/'
-      expect(result.startsWith('/')).toBe(false);
+    it('should block absolute path outside base', () => {
+      expect(() => sanitizePathTraversal('/etc/passwd', baseDir)).toThrow('Path traversal detected');
     });
   });
 
