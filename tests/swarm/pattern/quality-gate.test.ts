@@ -2,10 +2,10 @@
 // Quality Gate & Consensus Tests
 // ============================================================
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { assessQuality, passesQualityGate } from '../../../dist/src/swarm/pattern/quality-gate.js';
 import { createMockPattern } from '../../../tests/fixtures/patterns.js';
-import { reachConsensus, recordVote, resetTrust, getAgentTrust, getAgentTrusts } from '../../../dist/src/consensus/raft.js';
+import { reachConsensus, recordVote, resetTrust, getAgentTrust, getAgentTrusts } from '../../../dist/src/consensus/weighted-vote.js';
 
 describe('Quality Gate', () => {
   describe('assessQuality', () => {

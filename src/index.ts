@@ -12,7 +12,9 @@ export {
   addFeedback,
   getStats,
   getAllIds,
+  loadAllPatterns,
   _resetCache,
+  getStorageDir,
 } from './storage/local.js';
 
 export {
@@ -21,6 +23,8 @@ export {
   searchVectors,
   rebuildIndex,
   indexSize,
+  isEmbeddingModelLoaded,
+  getEmbeddingStatus,
 } from './memory/agentdb.js';
 
 export {
@@ -49,7 +53,7 @@ export {
   resetTrust,
   type ConsensusResult,
   type ConsensusDecision,
-} from './consensus/raft.js';
+} from './consensus/weighted-vote.js';
 
 export {
   getRoute,
@@ -64,6 +68,7 @@ export {
 
 export {
   interpretSubmission,
+  analyzeImage,
 } from './swarm/vision/index.js';
 
 export {
@@ -82,4 +87,4 @@ export {
   passesQualityGate,
 } from './swarm/pattern/quality-gate.js';
 
-export { getPatternStorageDir } from './storage/supabase.js';
+export { hasOpenAIKey, hasMcpAuth, config } from './config.js';

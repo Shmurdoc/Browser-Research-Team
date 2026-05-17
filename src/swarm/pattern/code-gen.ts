@@ -1,11 +1,13 @@
 // ============================================================
-// Code Generation Agent
+// Code Generation Agent — LLM-Powered
 // ============================================================
 //
 // Maps interpreted design patterns to framework component code.
-// Generates React + Tailwind by default, with Vue support.
+// Uses GPT-4o for context-aware generation when API key is available.
+// Falls back to template strings when no API key.
 // ============================================================
 
+import OpenAI from 'openai';
 import {
   type DesignPattern,
   type CodeGenResult,
@@ -14,8 +16,12 @@ import {
   type ComponentType,
 } from '../../types.js';
 import { getPattern } from '../../storage/local.js';
+import { config, hasOpenAIKey } from '../../config.js';
+import { createLogger_Scoped } from '../../logging/index.js';
 
-/** Component templates for React + Tailwind */
+const logger = createLogger_Scoped('code-gen');
+
+/** Component templates for React + Tailwind (fallback) */
 const REACT_TAILWIND_TEMPLATES: Partial<Record<ComponentType, string>> = {
   'navbar': `
 export function Navbar() {
@@ -231,7 +237,7 @@ export function PricingCard({ name, price, description, features, highlighted }:
 `,
 };
 
-/** Vue 3 + Tailwind templates */
+/** Vue 3 + Tailwind templates (fallback) */
 const VUE_TAILWIND_TEMPLATES: Partial<Record<ComponentType, string>> = {
   'button': `
 <script setup lang="ts">
@@ -286,6 +292,81 @@ defineProps<{
 };
 
 // ============================================================
+// LLM Code Generation
+// ============================================================
+
+async function generateCodeLLM(
+  pattern: DesignPattern,
+  request: CodeGenRequest
+): Promise<string[]> {
+  const openai = new OpenAI({
+    apiKey: config.openaiApiKey,
+    timeout: config.apiTimeoutMs,
+  });
+
+  const isReact = request.framework !== 'vue';
+  const lang = isReact ? 'React + TypeScript + Tailwind CSS' : 'Vue 3 + TypeScript + Tailwind CSS';
+  const ext = isReact ? '.tsx' : '.vue';
+
+  const patternContext = JSON.stringify({
+    title: pattern.title,
+    description: pattern.description,
+    layout: pattern.layout,
+    colors: pattern.colors,
+    typography: pattern.typography,
+    components: pattern.components,
+    tags: pattern.tags,
+  }, null, 2);
+
+  const componentPromises = pattern.components.map(async (component) => {
+    const componentName = capitalize(component);
+
+    const prompt = `Generate a production-ready ${componentName} component in ${lang}.
+
+Design context:
+${patternContext}
+
+Requirements:
+- Component name: ${componentName}
+- Use the detected color palette: primary=${pattern.colors.primary}, accent=${pattern.colors.accent}, background=${pattern.colors.background}, text=${pattern.colors.text}
+- Use the detected typography: heading font=${pattern.typography.heading.family}, body font=${pattern.typography.body.family}
+- Layout type: ${pattern.layout.type}
+- Follow ${lang} best practices
+- Include proper TypeScript types
+- Use Tailwind CSS classes (no inline styles)
+- Export the component as default
+- Return ONLY the component code, no markdown fences, no explanations`;
+
+    const response = await openai.chat.completions.create({
+      model: config.codeGenModel,
+      max_tokens: config.codeGenMaxTokens,
+      temperature: config.codeGenTemperature,
+      messages: [
+        {
+          role: 'system',
+          content: `You are an expert frontend developer. Generate clean, production-ready ${lang} components. Return only the code, nothing else.`,
+        },
+        { role: 'user', content: prompt },
+      ],
+    });
+
+    const code = response.choices[0]?.message?.content?.trim();
+    if (!code) throw new Error(`Empty response for ${componentName}`);
+
+    // Strip markdown code fences if present
+    const cleaned = code
+      .replace(/^```(?:tsx|vue|typescript|javascript)?\s*\n/, '')
+      .replace(/\n```$/, '')
+      .trim();
+
+    return { path: `components/${componentName}${ext}`, content: cleaned, language: isReact ? 'tsx' : 'vue' };
+  });
+
+  const files = await Promise.all(componentPromises);
+  return files.map(f => f.content);
+}
+
+// ============================================================
 // Public API
 // ============================================================
 
@@ -299,19 +380,73 @@ export async function generateCode(
 
   const files: CodeGenResult['files'] = [];
 
-  // Fetch the actual pattern to get its components
-  const { getPattern } = await import('../../storage/local.js');
   const pattern = await getPattern(request.patternId);
 
-  // Only generate components that are actually in the pattern
-  const componentsToGenerate: ComponentType[] = pattern?.components
+  if (!pattern) {
+    // Fallback: generate card component
+    const fallbackTemplate = templates.card;
+    if (fallbackTemplate) {
+      const ext = request.framework === 'vue' ? '.vue' : '.tsx';
+      files.push({
+        path: `components/Card${ext}`,
+        content: fallbackTemplate.trimStart(),
+        language: request.framework === 'vue' ? 'vue' : 'tsx',
+      });
+    }
+
+    return {
+      patternId: request.patternId,
+      framework: request.framework,
+      files,
+      preview: generatePreview(['card'], request),
+    };
+  }
+
+  // Try LLM generation if API key available
+  if (hasOpenAIKey && pattern.components.length > 0) {
+    try {
+      logger.info({ patternId: pattern.id, components: pattern.components.length }, 'Generating code via LLM');
+      const llmFiles = await generateCodeLLM(pattern, request);
+
+      for (let i = 0; i < pattern.components.length; i++) {
+        const component = pattern.components[i];
+        const ext = request.framework === 'vue' ? '.vue' : '.tsx';
+        const filename = `components/${capitalize(component)}${ext}`;
+
+        if (request.options?.includeTests) {
+          files.push({
+            path: `__tests__/${capitalize(component)}.test.${request.framework === 'vue' ? 'ts' : 'tsx'}`,
+            content: generateTest(component, request.framework),
+            language: 'typescript',
+          });
+        }
+
+        files.push({
+          path: filename,
+          content: llmFiles[i] || '',
+          language: request.framework === 'vue' ? 'vue' : 'tsx',
+        });
+      }
+
+      return {
+        patternId: request.patternId,
+        framework: request.framework,
+        files,
+        preview: generatePreview(pattern.components, request),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn({ error: message }, 'LLM code generation failed, falling back to templates');
+    }
+  }
+
+  // Fallback: template-based generation
+  const componentsToGenerate: ComponentType[] = pattern.components
     ? pattern.components.filter((c): c is ComponentType => c in templates)
     : [];
 
-  if (componentsToGenerate.length === 0) {
-    if (templates.card) {
-      componentsToGenerate.push('card');
-    }
+  if (componentsToGenerate.length === 0 && templates.card) {
+    componentsToGenerate.push('card');
   }
 
   for (const component of componentsToGenerate) {
@@ -321,31 +456,21 @@ export async function generateCode(
     const ext = request.framework === 'vue' ? '.vue' : '.tsx';
     const filename = `components/${capitalize(component)}${ext}`;
 
-    let content = template;
-
-    // Add TypeScript types if requested
-    if (request.options?.typescript && request.framework !== 'vue') {
-      // Already TypeScript in templates
-    }
-
-    // Add test file if requested
     if (request.options?.includeTests) {
-      const testContent = generateTest(component, request.framework);
       files.push({
         path: `__tests__/${capitalize(component)}.test.${request.framework === 'vue' ? 'ts' : 'tsx'}`,
-        content: testContent,
+        content: generateTest(component, request.framework),
         language: 'typescript',
       });
     }
 
     files.push({
       path: filename,
-      content: content.trimStart(),
+      content: template.trimStart(),
       language: request.framework === 'vue' ? 'vue' : 'tsx',
     });
   }
 
-  // Generate preview HTML
   const preview = generatePreview(componentsToGenerate, request);
 
   return {

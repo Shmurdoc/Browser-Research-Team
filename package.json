@@ -21,11 +21,14 @@
   },
   "bin": {
     "dpm": "dist/cli/index.js",
-    "dpm-mcp": "dist/mcp-server/index.js"
+    "dpm-mcp": "dist/mcp-server/index.js",
+    "dpm-web": "dist/web-server/index.js"
   },
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli/index.js",
+    "web": "node dist/web-server/index.js",
+    "dev:web": "tsx src/web-server/index.ts",
     "mcp": "node dist/mcp-server/index.js",
     "mcp-server": "node dist/mcp-server/index.js",
     "mcp-start": "npm run build && npm run mcp-server",
@@ -35,7 +38,9 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "postinstall": "npx playwright install chromium --with-deps 2>/dev/null || true",
+    "setup": "npm run build && npx playwright install chromium"
   },
   "keywords": [
     "design-patterns",
@@ -52,18 +57,25 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.8.0",
+    "@xenova/transformers": "^2.17.2",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "conf": "^13.1.0",
+    "cors": "^2.8.5",
     "dotenv": "^16.4.7",
+    "express": "^4.21.0",
     "figlet": "^1.8.0",
     "nanoid": "^5.1.5",
+    "openai": "^4.85.0",
     "ora": "^8.2.0",
     "pino": "^10.3.1",
     "pino-pretty": "^13.1.3",
+    "playwright": "^1.59.0",
     "zod": "^3.24.4"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/figlet": "^1.7.0",
     "@types/node": "^22.15.3",
     "@vitest/coverage-v8": "^3.2.4",
@@ -79,5 +91,8 @@
     "dist",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "overrides": {
+    "protobufjs": "^7.4.0"
+  }
 }

@@ -1,10 +1,11 @@
 // ============================================================
-// AgentDB — Vector Memory with HNSW-like Index
+// AgentDB — Vector Memory with Real Semantic Embeddings
 // ============================================================
 //
 // Lightweight vector memory for sub-millisecond pattern retrieval.
-// Uses cosine similarity search with optional metadata filtering.
-// In production, swap with real HNSW/WASM kernels (ruflo AgentDB).
+// Uses cosine similarity search with real semantic embeddings
+// from all-MiniLM-L6-v2 via @xenova/transformers (local, free).
+// Falls back to hash-based embeddings if model fails to load.
 // ============================================================
 
 import {
@@ -13,6 +14,9 @@ import {
   type PatternSearchResult,
 } from '../types.js';
 import { getPattern } from '../storage/local.js';
+import { createLogger_Scoped } from '../logging/index.js';
+
+const logger = createLogger_Scoped('agentdb');
 
 /** Internal vector entry */
 interface VectorEntry {
@@ -27,6 +31,38 @@ interface VectorEntry {
 
 let _vectors: VectorEntry[] = [];
 let _dirty = false;
+let _embeddingPipeline: any = null;
+let _pipelineReady = false;
+let _pipelineError: string | null = null;
+
+/** Initialize the embedding model (lazy, called on first use) */
+async function getEmbeddingPipeline() {
+  if (_pipelineReady) return _embeddingPipeline;
+  if (_pipelineError) return null;
+
+  // Skip model loading in test environment
+  if (process.env.NODE_ENV === 'test') {
+    _pipelineError = 'Model loading skipped in test environment';
+    return null;
+  }
+
+  try {
+    const { pipeline } = await import('@xenova/transformers');
+    _embeddingPipeline = await pipeline(
+      'feature-extraction',
+      'Xenova/all-MiniLM-L6-v2',
+      { quantized: true }
+    );
+    _pipelineReady = true;
+    logger.info('Embedding model loaded: all-MiniLM-L6-v2');
+    return _embeddingPipeline;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    _pipelineError = message;
+    logger.warn({ error: message }, 'Failed to load embedding model, using hash fallback');
+    return null;
+  }
+}
 
 /** Compute cosine similarity between two vectors */
 function cosineSimilarity(a: number[], b: number[]): number {
@@ -47,15 +83,40 @@ function normalize(v: number[]): Float64Array {
   return new Float64Array(v.map(x => x / mag));
 }
 
-/** Generate a deterministic embedding from pattern features (hash-based) */
-function generateEmbedding(pattern: DesignPattern): number[] {
+/** Generate embedding using real model or hash fallback */
+export async function generateEmbedding(pattern: DesignPattern): Promise<number[]> {
+  const pipeline = await getEmbeddingPipeline();
+
+  if (pipeline) {
+    try {
+      // Create text representation of the pattern
+      const text = [
+        pattern.title,
+        pattern.description,
+        pattern.layout.type,
+        ...pattern.components,
+        ...pattern.tags,
+      ].filter(Boolean).join(' ');
+
+      const output = await pipeline(text, { pooling: 'mean', normalize: true });
+      const embedding = Array.from(output.data) as number[];
+      return embedding;
+    } catch (error) {
+      logger.warn({ error: error instanceof Error ? error.message : String(error) }, 'Embedding inference failed, using hash fallback');
+    }
+  }
+
+  // Hash-based fallback
+  return generateHashEmbedding(pattern);
+}
+
+/** Hash-based embedding fallback (deterministic, no model needed) */
+function generateHashEmbedding(pattern: DesignPattern): number[] {
   const features: number[] = [];
 
-  // Encode layout type
   const layoutHash = hashString(pattern.layout.type);
   features.push((layoutHash % 100) / 100);
 
-  // Encode color palette
   for (const key of ['primary', 'secondary', 'accent', 'neutral'] as const) {
     const colorVal = parseInt((pattern.colors as any)[key].replace('#', ''), 16);
     features.push(((colorVal >> 16) & 0xFF) / 255);
@@ -63,7 +124,6 @@ function generateEmbedding(pattern: DesignPattern): number[] {
     features.push((colorVal & 0xFF) / 255);
   }
 
-  // Encode components (multi-hot)
   const allComponents = ['navbar', 'sidebar', 'footer', 'card', 'button', 'input',
     'form', 'table', 'modal', 'dropdown', 'accordion', 'tabs', 'carousel',
     'hero-section', 'feature-grid', 'pricing-card', 'cta-section', 'faq-section'];
@@ -71,17 +131,15 @@ function generateEmbedding(pattern: DesignPattern): number[] {
     features.push(pattern.components.includes(comp as any) ? 1 : 0);
   }
 
-  // Encode framework hints
   for (const fw of ['react', 'vue', 'svelte', 'angular'] as const) {
     features.push(pattern.frameworkHints.includes(fw) ? 1 : 0);
   }
 
-  // Pad to at least 64 dimensions
   while (features.length < 64) {
     features.push(hashString(pattern.id + features.length) % 100 / 100);
   }
 
-  return features.slice(0, 128); // cap at 128 dims
+  return features.slice(0, 128);
 }
 
 /** Simple string hash */
@@ -90,7 +148,7 @@ function hashString(s: string): number {
   for (let i = 0; i < s.length; i++) {
     const chr = s.charCodeAt(i);
     hash = ((hash << 5) - hash) + chr;
-    hash |= 0; // Convert to 32bit integer
+    hash |= 0;
   }
   return Math.abs(hash);
 }
@@ -101,14 +159,14 @@ function hashString(s: string): number {
 
 /** Index a pattern into vector memory */
 export async function indexPattern(pattern: DesignPattern): Promise<void> {
-  const embedding = normalize(generateEmbedding(pattern));
+  const embedding = await generateEmbedding(pattern);
+  const normalized = normalize(embedding);
 
-  // Remove existing entry
   _vectors = _vectors.filter(v => v.id !== pattern.id);
 
   _vectors.push({
     id: pattern.id,
-    embedding,
+    embedding: normalized,
     metadata: {
       qualityScore: pattern.qualityScore,
       source: pattern.source,
@@ -124,23 +182,34 @@ export async function removeFromIndex(id: PatternId): Promise<void> {
   _dirty = true;
 }
 
-/** Search vector memory by text query (converted to embedding) */
+/** Search vector memory by text query */
 export async function searchVectors(
   queryText: string,
   limit: number = 20
 ): Promise<Array<{ id: PatternId; score: number }>> {
   if (_vectors.length === 0) return [];
 
-  // Create a query embedding from the text
-  const queryEmbedding = normalize(textToEmbedding(queryText));
+  let queryEmbedding: number[];
 
-  // Score all vectors
+  const pipeline = await getEmbeddingPipeline();
+  if (pipeline) {
+    try {
+      const output = await pipeline(queryText, { pooling: 'mean', normalize: true });
+      queryEmbedding = Array.from(output.data) as number[];
+    } catch {
+      queryEmbedding = textToEmbeddingFallback(queryText);
+    }
+  } else {
+    queryEmbedding = textToEmbeddingFallback(queryText);
+  }
+
+  const normalizedQuery = normalize(queryEmbedding);
+
   const scored = _vectors.map(v => ({
     id: v.id,
-    score: cosineSimilarity(Array.from(queryEmbedding), Array.from(v.embedding)),
+    score: cosineSimilarity(Array.from(normalizedQuery), Array.from(v.embedding)),
   }));
 
-  // Sort by score desc, quality boost
   scored.sort((a, b) => {
     const aPattern = _vectors.find(v => v.id === a.id);
     const bPattern = _vectors.find(v => v.id === b.id);
@@ -152,8 +221,8 @@ export async function searchVectors(
   return scored.slice(0, limit);
 }
 
-/** Convert text to a simple embedding vector */
-function textToEmbedding(text: string): number[] {
+/** Fallback: convert text to embedding via hash */
+function textToEmbeddingFallback(text: string): number[] {
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
   const dims = 128;
   const embedding = new Array(dims).fill(0);
@@ -162,7 +231,6 @@ function textToEmbedding(text: string): number[] {
     const hash = hashString(words[i]);
     const idx = hash % dims;
     embedding[idx] += 1.0;
-    // Also spread to adjacent dimensions for fuzzy matching
     if (idx > 0) embedding[idx - 1] += 0.5;
     if (idx < dims - 1) embedding[idx + 1] += 0.5;
   }
@@ -184,5 +252,12 @@ export function indexSize(): number {
   return _vectors.length;
 }
 
-/** Export: generateEmbedding for external use */
-export { generateEmbedding };
+/** Check if real embedding model is loaded */
+export function isEmbeddingModelLoaded(): boolean {
+  return _pipelineReady;
+}
+
+/** Get embedding model status */
+export function getEmbeddingStatus(): { loaded: boolean; error: string | null } {
+  return { loaded: _pipelineReady, error: _pipelineError };
+}

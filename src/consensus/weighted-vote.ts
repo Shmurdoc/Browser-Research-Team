@@ -1,10 +1,10 @@
 // ============================================================
-// Raft Consensus — Anti-Hallucination Layer
+// Weighted Vote — Agent Consensus Layer
 // ============================================================
 //
-// Implements a lightweight Raft-inspired consensus protocol
-// for multi-agent decision making. Agents vote on pattern
-// relevance, quality, and interpretation confidence.
+// Implements weighted voting for multi-agent decision making.
+// Agents vote on pattern relevance, quality, and interpretation
+// confidence. Votes are weighted by agent trust scores.
 // Requires majority agreement (N/2 + 1) to accept.
 // ============================================================
 

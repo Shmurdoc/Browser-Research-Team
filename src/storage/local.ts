@@ -429,3 +429,9 @@ export async function getAllIds(): Promise<PatternId[]> {
     );
   }
 }
+
+/** Load all patterns (for vector index rebuild) */
+export async function loadAllPatterns(): Promise<DesignPattern[]> {
+  const index = await loadIndex();
+  return Object.values(index.patterns);
+}

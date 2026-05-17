@@ -4,8 +4,7 @@
 //
 // Interprets design images and extracts structured information:
 // layout, components, colors, typography.
-// In production, agents use real CV models (DETR, CLIP, BLIP2).
-// For now, generates synthetic interpretations from metadata.
+// Uses GPT-4o vision API when available, falls back to heuristics.
 // ============================================================
 
 import {
@@ -23,6 +22,7 @@ import { analyzeLayout } from './layout.js';
 import { classifyElements } from './elements.js';
 import { extractColors } from './color.js';
 import { detectTypography } from './typography.js';
+import { analyzeImage } from './analyze.js';
 
 const logger = createLogger_Scoped('vision');
 
@@ -42,6 +42,27 @@ const VISION_RETRY_CONFIG: RetryConfig = {
   maxDelayMs: 3000,
   jitterFraction: 0.1,
 };
+
+/**
+ * Run a vision agent with retry and partial failure handling
+ */
+async function runVisionAgent<T extends { confidence: number }>(
+  name: string,
+  agent: (s: PatternSubmission) => Promise<T>,
+  submission: PatternSubmission,
+  fallbackType: 'layout' | 'elements' | 'colors' | 'typography'
+): Promise<T> {
+  try {
+    return await retry(
+      () => agent(submission),
+      VISION_RETRY_CONFIG
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn({ name, error: message }, `Vision agent ${name} failed, using fallback`);
+    return createFallbackResult(fallbackType, submission) as T;
+  }
+}
 
 /**
  * Create a fallback result with confidence=0 for a failed vision agent
@@ -85,70 +106,20 @@ function createFallbackResult(
   return fallbacks[type]?.() ?? {};
 }
 
-/**
- * Run a vision agent with retry and partial failure handling
- */
-async function runVisionAgent<T extends { confidence: number }>(
-  name: string,
-  agent: (s: PatternSubmission) => Promise<T>,
-  submission: PatternSubmission,
-  fallbackType: 'layout' | 'elements' | 'colors' | 'typography'
-): Promise<T> {
-  try {
-    return await retry(
-      () => agent(submission),
-      VISION_RETRY_CONFIG
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.warn({ name, error: message }, `Vision agent ${name} failed, using fallback`);
-    return createFallbackResult(fallbackType, submission) as T;
-  }
-}
-
 /** Run full vision pipeline on a submission */
 export async function interpretSubmission(
   submission: PatternSubmission
 ): Promise<VisionResult> {
   try {
-    // Run all vision agents in parallel with error isolation
-    const [layout, elements, colors, typography] = await Promise.all([
-      runVisionAgent('layout', analyzeLayout, submission, 'layout'),
-      runVisionAgent('elements', classifyElements, submission, 'elements'),
-      runVisionAgent('colors', extractColors, submission, 'colors'),
-      runVisionAgent('typography', detectTypography, submission, 'typography'),
-    ]);
-
-    // Calculate overall confidence (accounting for failed agents)
-    const confidences = [
-      layout.confidence ?? 0,
-      elements.confidence ?? 0,
-      colors.confidence ?? 0,
-      typography.confidence ?? 0,
-    ].filter(c => c > 0);
-
-    const confidence = confidences.length > 0
-      ? confidences.reduce((a, b) => a + b, 0) / confidences.length
-      : 0;
+    // Use real GPT-4o vision analysis when image URL is available
+    const result = await analyzeImage(submission.imageUrl, submission);
 
     return {
-      layout,
-      components: elements.components ?? [],
-      colors: colors.palette ?? {
-        primary: '#000000',
-        secondary: '#ffffff',
-        accent: '#0000ff',
-        neutral: '#808080',
-        background: '#ffffff',
-        text: '#000000',
-        additional: [],
-      },
-      typography: typography.typography ?? {
-        heading: { family: 'sans-serif', weight: 700, size: '24px' },
-        body: { family: 'sans-serif', weight: 400, size: '16px' },
-        other: [],
-      },
-      confidence,
+      layout: result.layout,
+      components: result.components,
+      colors: result.colors,
+      typography: result.typography,
+      confidence: result.confidence,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -163,3 +134,4 @@ export { analyzeLayout } from './layout.js';
 export { classifyElements } from './elements.js';
 export { extractColors } from './color.js';
 export { detectTypography } from './typography.js';
+export { analyzeImage } from './analyze.js';

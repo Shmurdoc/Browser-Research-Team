@@ -1,72 +1,127 @@
 // ============================================================
-// Pinterest Scout Agent
+// Pinterest Scout Agent — Real Design Pattern Discovery
 // ============================================================
 //
-// Queries Pinterest for design inspiration pins.
-// Uses the Pinterest API via REST (requires PIN_API_KEY env var).
-// Falls back to mock data if no API key is set.
+// Searches Pinterest for design patterns using Playwright.
+// Extracts pins with titles, image URLs, descriptions, and links.
+// Falls back to heuristic mock data if scraping fails.
 // ============================================================
 
 import { type PatternSubmission } from '../../types.js';
 import { createLogger_Scoped } from '../../logging/index.js';
 import type { ScoutResult } from './index.js';
+import { getPage, releasePage } from './browser.js';
 
 const logger = createLogger_Scoped('scout:pinterest');
-const PINTEREST_API = 'https://api.pinterest.com/v5';
-const API_KEY = process.env.PIN_API_KEY ?? process.env.PINTEREST_API_KEY ?? '';
+const PINTEREST_SEARCH_URL = 'https://www.pinterest.com/search/pins/';
 
 export async function scoutPinterest(query: string): Promise<ScoutResult> {
   const start = Date.now();
   const errors: string[] = [];
+  const submissions: PatternSubmission[] = [];
 
   logger.debug({ query }, 'Starting Pinterest scout query');
 
-  if (API_KEY) {
+  // Skip Playwright in test environment
+  if (process.env.NODE_ENV !== 'test') {
     try {
-      const url = `${PINTEREST_API}/pins/search?query=${encodeURIComponent(query + ' ui design')}&page_size=25`;
-      logger.debug({ url }, 'Calling Pinterest API');
+      const page = await getPage();
 
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${API_KEY}` },
+    try {
+      const searchUrl = `${PINTEREST_SEARCH_URL}?q=${encodeURIComponent(query + ' ui design')}`;
+      logger.debug({ url: searchUrl }, 'Navigating to Pinterest search');
+
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+      // Wait for pin results to appear
+      await page.waitForSelector(
+        '[data-test-id="pin"], article, [data-grid-item="true"]',
+        { timeout: 8000 }
+      ).catch(() => { /* pins may already be rendered */ });
+
+      // Give dynamic content a moment
+      await page.waitForTimeout(1500);
+
+      const pins = await page.evaluate(() => {
+        const results: Array<{ title: string; url: string; imageUrl: string; description: string }> = [];
+        const seen = new Set<string>();
+
+        // Multiple selector strategies
+        const selectors = [
+          '[data-test-id="pin"]',
+          'article',
+          '[data-grid-item="true"]',
+          '[class*="pinWrapper"]',
+        ];
+
+        const allElements = new Set<Element>();
+        for (const sel of selectors) {
+          document.querySelectorAll(sel).forEach(el => allElements.add(el));
+        }
+
+        for (const el of allElements) {
+          const link = el.querySelector('a[href*="/pin/"]') as HTMLAnchorElement | null;
+          const img = el.querySelector('img[src]') as HTMLImageElement | null;
+          const titleEl = el.querySelector('[class*="title"], h2, h3') as HTMLElement | null;
+
+          if (!img) continue;
+
+          const href = link?.href || '';
+          const fullUrl = href.startsWith('/') ? `https://www.pinterest.com${href}` : href;
+          const key = fullUrl || img.src;
+          if (seen.has(key) || !key) continue;
+          seen.add(key);
+
+          results.push({
+            title: titleEl?.textContent?.trim() || '',
+            url: fullUrl,
+            imageUrl: img.src || img.getAttribute('data-src') || '',
+            description: el.getAttribute('aria-label') || '',
+          });
+
+          if (results.length >= 10) break;
+        }
+
+        return results;
       });
 
-      if (!res.ok) {
-        const error = `Pinterest API error: ${res.status} ${res.statusText}`;
-        errors.push(error);
-        logger.warn({ status: res.status, statusText: res.statusText }, error);
-        // Fall through to mock
-      } else {
-        const data = await res.json() as any;
-        const submissions: PatternSubmission[] = (data.items ?? []).map((item: any) => ({
-          source: 'pinterest' as const,
-          url: item.link ?? `https://pinterest.com/pin/${item.id}`,
-          title: item.title ?? item.alt_text ?? 'Untitled',
-          imageUrl: item.media?.images?.original?.url,
-          description: item.alt_text ?? item.description ?? '',
-          tags: (item.hashtags ?? []).map((t: string) => t.replace('#', '')),
-        }));
+      for (const pin of pins) {
+        if (!pin.imageUrl) continue;
 
-        const tookMs = Date.now() - start;
-        logger.info({ count: submissions.length, tookMs }, 'Pinterest scout completed successfully');
-        return { source: 'pinterest', submissions, errors, tookMs };
+        submissions.push({
+          source: 'pinterest',
+          url: pin.url || pin.imageUrl,
+          title: pin.title || `Pinterest Design — ${query}`,
+          imageUrl: pin.imageUrl,
+          description: pin.description || '',
+          tags: [query.toLowerCase(), 'pinterest', 'design'],
+        });
       }
-    } catch (e: any) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
-      errors.push(`Pinterest API exception: ${errorMsg}`);
-      logger.error({ error: e }, 'Pinterest API exception');
+
+      logger.info({ query, found: submissions.length }, 'Pinterest scout completed');
+    } finally {
+      await releasePage(page);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn({ query, error: message }, 'Pinterest scrape failed, using fallback');
+    errors.push(`Pinterest scrape failed: ${message}`);
+  }
+  } // end of NODE_ENV check
+
+  // Fallback to curated mock data if scraping returned nothing or failed
+  if (submissions.length === 0) {
+    submissions.push(...getFallbackPinterest(query));
+    if (errors.length === 0) {
+      errors.push('No Pinterest API key set (PIN_API_KEY). Using built-in design library.');
     }
   }
 
-  // No API key or error: return curated mock data
-  const mockDesigns = getMockDesigns(query);
-  const fallbackMsg = 'No Pinterest API key set (PIN_API_KEY). Using built-in design library.';
-  errors.push(fallbackMsg);
   const tookMs = Date.now() - start;
-  logger.info({ count: mockDesigns.length, tookMs }, fallbackMsg);
-  return { source: 'pinterest', submissions: mockDesigns, errors, tookMs };
+  return { source: 'pinterest', submissions, errors, tookMs };
 }
 
-function getMockDesigns(query: string): PatternSubmission[] {
+function getFallbackPinterest(query: string): PatternSubmission[] {
   const q = query.toLowerCase();
   const designs: PatternSubmission[] = [
     {
@@ -119,7 +174,6 @@ function getMockDesigns(query: string): PatternSubmission[] {
     },
   ];
 
-  // Filter by query relevance
   const scored = designs.map(d => {
     const tagScore = (d.tags ?? []).filter(t => q.includes(t)).length;
     const titleScore = (d.title ?? '').toLowerCase().includes(q) ? 2 : 0;

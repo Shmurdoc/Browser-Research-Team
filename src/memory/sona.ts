@@ -5,10 +5,17 @@
 // Learns from user feedback to improve pattern matching.
 // Stores successful (high-rated) patterns and adjusts
 // relevance scoring based on historical feedback patterns.
+// Persists state to disk so learning survives restarts.
 // ============================================================
 
 import { type DesignPattern, type PatternId } from '../types.js';
 import { addFeedback, getPattern } from '../storage/local.js';
+import { getPatternStorageDir } from '../storage/supabase.js';
+import { createLogger_Scoped } from '../logging/index.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const logger = createLogger_Scoped('sona');
 
 /** A learned association between tags and quality */
 interface LearnedPattern {
@@ -22,8 +29,8 @@ interface LearnedPattern {
 interface SONAState {
   learnedPatterns: LearnedPattern[];
   sourceQuality: Record<string, { avgRating: number; count: number }>;
-  componentAffinities: Record<string, Record<string, number>>; // co-occurrence matrix
-  adaptationRate: number; // 0-1, how fast to adapt
+  componentAffinities: Record<string, Record<string, number>>;
+  adaptationRate: number;
 }
 
 let _state: SONAState = {
@@ -33,11 +40,64 @@ let _state: SONAState = {
   adaptationRate: 0.15,
 };
 
+let _stateLoaded = false;
+
+/** Path to the persisted SONA state file */
+function _getStatePath(): string {
+  const storageDir = getPatternStorageDir();
+  return join(storageDir, 'sona-state.json');
+}
+
+/** Load persisted state from disk (called once on init) */
+function _loadState(): void {
+  if (_stateLoaded) return;
+  _stateLoaded = true;
+
+  try {
+    const path = _getStatePath();
+    if (!existsSync(path)) return;
+
+    const raw = readFileSync(path, 'utf-8');
+    const persisted = JSON.parse(raw) as Partial<SONAState>;
+
+    if (persisted.learnedPatterns) _state.learnedPatterns = persisted.learnedPatterns;
+    if (persisted.sourceQuality) _state.sourceQuality = persisted.sourceQuality;
+    if (persisted.componentAffinities) _state.componentAffinities = persisted.componentAffinities;
+    if (typeof persisted.adaptationRate === 'number') _state.adaptationRate = persisted.adaptationRate;
+
+    logger.info(
+      { patterns: _state.learnedPatterns.length, sources: Object.keys(_state.sourceQuality).length },
+      'SONA state loaded from disk'
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn({ error: message }, 'Failed to load SONA state, starting fresh');
+  }
+}
+
+/** Persist current state to disk */
+function _saveState(): void {
+  try {
+    const path = _getStatePath();
+    const storageDir = getPatternStorageDir();
+
+    if (!existsSync(storageDir)) {
+      mkdirSync(storageDir, { recursive: true });
+    }
+
+    const data = JSON.stringify(_state, null, 2);
+    writeFileSync(path, data, 'utf-8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn({ error: message }, 'Failed to save SONA state');
+  }
+}
+
 // ============================================================
 // Public API
 // ============================================================
 
-/** Initialize SONA with seed data */
+/** Initialize SONA — loads persisted state if available */
 export function initSONA(options?: { adaptationRate?: number }): void {
   _state = {
     learnedPatterns: [],
@@ -45,9 +105,11 @@ export function initSONA(options?: { adaptationRate?: number }): void {
     componentAffinities: {},
     adaptationRate: options?.adaptationRate ?? 0.15,
   };
+  _stateLoaded = false;
+  _loadState();
 }
 
-/** Learn from user feedback */
+/** Learn from user feedback and persist state */
 export async function learnFromFeedback(
   patternId: PatternId,
   rating: number,
@@ -101,6 +163,9 @@ export async function learnFromFeedback(
     _state.learnedPatterns.sort((a, b) => b.count - a.count);
     _state.learnedPatterns = _state.learnedPatterns.slice(0, 100);
   }
+
+  // Persist to disk
+  _saveState();
 }
 
 /** Predict quality of a pattern based on learned associations */
@@ -126,7 +191,7 @@ export function predictQuality(pattern: DesignPattern): number {
     for (let j = i + 1; j < pattern.components.length; j++) {
       const aff = _state.componentAffinities[pattern.components[i]]?.[pattern.components[j]];
       if (aff && aff > 3) {
-        score += 0.2; // high co-occurrence = more confident
+        score += 0.2;
       }
     }
   }
@@ -150,9 +215,10 @@ export function getSONAStats(): {
 /** Adjust adaptation rate */
 export function setAdaptationRate(rate: number): void {
   _state.adaptationRate = Math.max(0.01, Math.min(1, rate));
+  _saveState();
 }
 
-/** Reset SONA state */
+/** Reset SONA state and clear persisted file */
 export function resetSONA(): void {
   _state = {
     learnedPatterns: [],
@@ -160,6 +226,16 @@ export function resetSONA(): void {
     componentAffinities: {},
     adaptationRate: 0.15,
   };
+  _stateLoaded = true;
+
+  try {
+    const path = _getStatePath();
+    if (existsSync(path)) {
+      writeFileSync(path, JSON.stringify(_state, null, 2), 'utf-8');
+    }
+  } catch {
+    // Ignore write errors on reset
+  }
 }
 
 // Helpers

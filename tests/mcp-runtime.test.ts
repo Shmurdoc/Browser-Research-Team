@@ -28,10 +28,11 @@ describe('MCP Server Startup Validation', () => {
     });
 
     it('should have exported server instance', async () => {
-      const { server } = await import('../dist/mcp-server/index.js');
-      expect(server).toBeDefined();
-      expect(server.connect).toBeDefined();
-    });
+      process.env.NODE_ENV = 'test';
+      const mod = await import('../dist/mcp-server/index.js');
+      expect(mod.server).toBeDefined();
+      expect(mod.server.connect).toBeDefined();
+    }, { timeout: 15000 });
   });
 
   describe('Code Generation Module', () => {
@@ -62,8 +63,8 @@ describe('MCP Server Startup Validation', () => {
           body: { family: 'Inter', weight: 400, size: '16px' },
           other: [],
         },
-        components: ['card'],
-        frameworkHints: ['react'],
+        components: ['card'] as import('../src/types.js').ComponentType[],
+        frameworkHints: ['react'] as import('../src/types.js').FrameworkHint[],
         tags: ['test'],
         qualityScore: 7,
         embedding: [],

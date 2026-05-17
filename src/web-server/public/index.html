@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Design Pattern Multiverse</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="header-content">
+      <h1>Design Pattern Multiverse</h1>
+      <p class="subtitle">AI-powered design pattern discovery and code generation</p>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="browse">Browse</button>
+    <button class="tab" data-tab="search">Search</button>
+    <button class="tab" data-tab="scout">Scout</button>
+    <button class="tab" data-tab="stats">Stats</button>
+  </nav>
+
+  <main>
+    <!-- Browse Tab -->
+    <section id="browse" class="tab-content active">
+      <div class="toolbar">
+        <input type="text" id="quick-search" placeholder="Quick search..." class="search-input">
+        <select id="filter-source">
+          <option value="">All Sources</option>
+          <option value="pinterest">Pinterest</option>
+          <option value="dribbble">Dribbble</option>
+          <option value="behance">Behance</option>
+          <option value="figma-community">Figma</option>
+        </select>
+        <select id="filter-layout">
+          <option value="">All Layouts</option>
+          <option value="dashboard">Dashboard</option>
+          <option value="landing-page">Landing Page</option>
+          <option value="hero-section">Hero Section</option>
+          <option value="card-grid">Card Grid</option>
+          <option value="form">Form</option>
+          <option value="navbar">Navbar</option>
+          <option value="sidebar">Sidebar</option>
+          <option value="modal">Modal</option>
+          <option value="pricing">Pricing</option>
+        </select>
+      </div>
+      <div id="patterns-grid" class="patterns-grid"></div>
+      <div id="loading" class="loading hidden">Loading patterns...</div>
+      <div id="empty-state" class="empty-state hidden">
+        <p>No patterns found. Try searching or scouting for new designs.</p>
+        <button id="scout-btn" class="btn primary">Scout for Patterns</button>
+      </div>
+    </section>
+
+    <!-- Search Tab -->
+    <section id="search" class="tab-content">
+      <div class="search-panel">
+        <h2>Vector Search</h2>
+        <p>Find patterns by semantic similarity</p>
+        <input type="text" id="vector-search" placeholder="Describe what you're looking for..." class="search-input large">
+        <button id="vector-search-btn" class="btn primary">Search</button>
+        <div id="vector-results" class="results-list"></div>
+      </div>
+    </section>
+
+    <!-- Scout Tab -->
+    <section id="scout" class="tab-content">
+      <div class="scout-panel">
+        <h2>Scout for Patterns</h2>
+        <p>Search external design sources for inspiration</p>
+        <input type="text" id="scout-query" placeholder="What are you looking for? (e.g. dark dashboard, pricing page)" class="search-input large">
+        <div class="source-select">
+          <label><input type="checkbox" value="pinterest" checked> Pinterest</label>
+          <label><input type="checkbox" value="dribbble" checked> Dribbble</label>
+          <label><input type="checkbox" value="behance" checked> Behance</label>
+          <label><input type="checkbox" value="figma-community" checked> Figma</label>
+        </div>
+        <button id="scout-start-btn" class="btn primary">Start Scouting</button>
+        <div id="scout-status" class="scout-status hidden"></div>
+        <div id="scout-results" class="results-list"></div>
+      </div>
+    </section>
+
+    <!-- Stats Tab -->
+    <section id="stats" class="tab-content">
+      <div class="stats-panel">
+        <h2>Library Statistics</h2>
+        <div id="stats-content" class="stats-grid"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Pattern Detail Modal -->
+  <div id="pattern-modal" class="modal hidden">
+    <div class="modal-content">
+      <button class="modal-close">&times;</button>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

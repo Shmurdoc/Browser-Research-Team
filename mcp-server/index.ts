@@ -58,6 +58,43 @@ import {
   type LayoutInfo,
   type ComponentType,
 } from '../src/index.js';
+import { config, hasMcpAuth } from '../src/config.js';
+
+// ============================================================
+// Auth — API key validation
+// ============================================================
+
+function validateAuth(): boolean {
+  if (!hasMcpAuth) return true; // no auth configured = allow all
+  const providedKey = process.env.DPM_MCP_KEY_PROVIDED;
+  return providedKey === config.mcpServerKey;
+}
+
+// ============================================================
+// Rate Limiting — Sliding window
+// ============================================================
+
+interface RateWindow {
+  requests: number[];
+}
+
+const _rateWindow: RateWindow = { requests: [] };
+
+function checkRateLimit(): boolean {
+  const now = Date.now();
+  const windowMs = 60_000; // 1 minute
+  const maxRequests = config.rateLimitPerMinute;
+
+  // Remove expired entries
+  _rateWindow.requests = _rateWindow.requests.filter(t => now - t < windowMs);
+
+  if (_rateWindow.requests.length >= maxRequests) {
+    return false;
+  }
+
+  _rateWindow.requests.push(now);
+  return true;
+}
 
 // ============================================================
 // Bootstrap
@@ -69,9 +106,8 @@ initSONA({ adaptationRate: 0.15 });
 // Rebuild vector index from storage on startup
 (async () => {
   try {
-    const { getAllIds, getPattern } = await import('../src/storage/local.js');
-    const ids = await getAllIds();
-    const patterns = (await Promise.all(ids.map(id => getPattern(id)))).filter(Boolean) as DesignPattern[];
+    const { loadAllPatterns } = await import('../src/storage/local.js');
+    const patterns = await loadAllPatterns();
     if (patterns.length > 0) {
       await rebuildIndex(patterns);
       console.error(`[dpm] Rebuilt vector index with ${patterns.length} patterns`);
@@ -552,9 +588,8 @@ A higher rating teaches the system that similar patterns should be ranked higher
         }
 
         // Trigger SONA learning
-        await learnFromFeedback(id, rating, tags);
-
         const pattern = await getPattern(id);
+        await learnFromFeedback(id, rating, pattern?.tags ?? []);
 
         return {
           content: [{
@@ -830,6 +865,22 @@ try {
 
 try {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    // Auth check
+    if (!validateAuth()) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: 'Authentication failed. Set DPM_MCP_KEY to match the server key.' }],
+      };
+    }
+
+    // Rate limit check
+    if (!checkRateLimit()) {
+      return {
+        isError: true,
+        content: [{ type: 'text', text: `Rate limit exceeded. Max ${config.rateLimitPerMinute} requests per minute.` }],
+      };
+    }
+
     const tool = tools.find(t => t.name === request.params.name);
     if (!tool) {
       return {
