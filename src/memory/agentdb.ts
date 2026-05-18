@@ -146,7 +146,8 @@ function generateHashEmbedding(pattern: DesignPattern): number[] {
     features.push(pattern.frameworkHints.includes(fw) ? 1 : 0);
   }
 
-  while (features.length < 64) {
+  // Ensure a consistent embedding dimensionality (128) so search math never mismatches
+  while (features.length < 128) {
     features.push(hashString(pattern.id + features.length) % 100 / 100);
   }
 
