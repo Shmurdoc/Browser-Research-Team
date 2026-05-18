@@ -9,3 +9,6 @@ patterns/
 *.tsbuildinfo
 .test-*/
 coverage/
+server.json
+*.md
+!README.md

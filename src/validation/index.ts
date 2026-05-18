@@ -5,8 +5,11 @@
 import { ZodError, z } from 'zod';
 import { ValidationError } from '../errors/index.js';
 import { createLogger_Scoped } from '../logging/index.js';
+import { sanitizeXSS, sanitizeSQLInjection, sanitizePathTraversal, sanitizeURL, sanitizeObject, sanitizePromptInjection } from './sanitize.js';
 
 const logger = createLogger_Scoped('validation');
+
+export { sanitizeXSS, sanitizeSQLInjection, sanitizePathTraversal, sanitizeURL, sanitizeObject, sanitizePromptInjection };
 
 /**
  * Validate input using a Zod schema and throw ValidationError if invalid

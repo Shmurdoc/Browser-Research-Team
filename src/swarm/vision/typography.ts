@@ -55,7 +55,7 @@ export async function detectTypography(
 
   // Determine if this looks like a dark design
   const isDark = text.includes('dark');
-  const bgMode = isDark ? '#F9FAFB' : '#111827';
+  const bgMode = isDark ? '#111827' : '#F9FAFB';
 
   const typography: TypographyInfo = {
     heading: {

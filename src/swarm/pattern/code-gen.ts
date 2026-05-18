@@ -18,6 +18,7 @@ import {
 import { getPattern } from '../../storage/local.js';
 import { config, hasOpenAIKey } from '../../config.js';
 import { createLogger_Scoped } from '../../logging/index.js';
+import { sanitizePromptInjection } from '../../validation/sanitize.js';
 
 const logger = createLogger_Scoped('code-gen');
 
@@ -298,7 +299,7 @@ defineProps<{
 async function generateCodeLLM(
   pattern: DesignPattern,
   request: CodeGenRequest
-): Promise<string[]> {
+): Promise<CodeGenResult['files']> {
   const openai = new OpenAI({
     apiKey: config.openaiApiKey,
     timeout: config.apiTimeoutMs,
@@ -353,8 +354,11 @@ Requirements:
     const code = response.choices[0]?.message?.content?.trim();
     if (!code) throw new Error(`Empty response for ${componentName}`);
 
+    // Sanitize LLM output to prevent prompt injection leakage
+    const sanitized = sanitizePromptInjection(code);
+
     // Strip markdown code fences if present
-    const cleaned = code
+    const cleaned = sanitized
       .replace(/^```(?:tsx|vue|typescript|javascript)?\s*\n/, '')
       .replace(/\n```$/, '')
       .trim();
@@ -363,7 +367,7 @@ Requirements:
   });
 
   const files = await Promise.all(componentPromises);
-  return files.map(f => f.content);
+  return files;
 }
 
 // ============================================================
@@ -408,24 +412,17 @@ export async function generateCode(
       logger.info({ patternId: pattern.id, components: pattern.components.length }, 'Generating code via LLM');
       const llmFiles = await generateCodeLLM(pattern, request);
 
-      for (let i = 0; i < pattern.components.length; i++) {
-        const component = pattern.components[i];
-        const ext = request.framework === 'vue' ? '.vue' : '.tsx';
-        const filename = `components/${capitalize(component)}${ext}`;
-
+      for (const llmFile of llmFiles) {
         if (request.options?.includeTests) {
+          const componentName = llmFile.path.split('/').pop()?.replace(/\.(tsx|vue)$/, '') ?? 'Component';
           files.push({
-            path: `__tests__/${capitalize(component)}.test.${request.framework === 'vue' ? 'ts' : 'tsx'}`,
-            content: generateTest(component, request.framework),
+            path: `__tests__/${componentName}.test.${request.framework === 'vue' ? 'ts' : 'tsx'}`,
+            content: generateTest(componentName.toLowerCase() as ComponentType, request.framework),
             language: 'typescript',
           });
         }
 
-        files.push({
-          path: filename,
-          content: llmFiles[i] || '',
-          language: request.framework === 'vue' ? 'vue' : 'tsx',
-        });
+        files.push(llmFile);
       }
 
       return {

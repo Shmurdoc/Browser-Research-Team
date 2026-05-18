@@ -37,6 +37,7 @@ export {
 } from './memory/sona.js';
 
 export {
+  initReasoningBank,
   recordTrace,
   findSimilarTraces,
   getImportantMemories,
@@ -48,6 +49,7 @@ export {
 
 export {
   reachConsensus,
+  updateTrust,
   getAgentTrust,
   getAgentTrusts,
   resetTrust,
@@ -56,9 +58,12 @@ export {
 } from './consensus/weighted-vote.js';
 
 export {
+  initRouter,
   getRoute,
   recordOutcome,
   qTableSize,
+  getDefaultRoutes,
+  getRouterStats,
 } from './swarm/router.js';
 
 export {
@@ -101,4 +106,14 @@ export {
   sanitizeInput,
   sanitizeObject,
   safeBasename,
+  sanitizePromptInjection,
 } from './validation/sanitize.js';
+
+export {
+  downloadAndProcessImage,
+  extractColorPalette,
+  getImagePath,
+  readImageFile,
+  imageToDataUrl,
+  deletePatternImages,
+} from './utils/image-pipeline.js';

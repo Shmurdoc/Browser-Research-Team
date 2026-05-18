@@ -25,6 +25,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
@@ -48,6 +53,8 @@ import {
   searchVectors,
   rebuildIndex,
   assignTaxonomy,
+  initRouter,
+  initReasoningBank,
   type PatternQuery,
   type DesignPattern,
   type CodeGenRequest,
@@ -59,6 +66,7 @@ import {
   type ComponentType,
 } from '../src/index.js';
 import { config, hasMcpAuth } from '../src/config.js';
+import { coerceSource, coerceLayout, coerceFramework, coerceSourceList } from './type-guards.js';
 
 // ============================================================
 // Auth — API key validation
@@ -103,6 +111,12 @@ function checkRateLimit(): boolean {
 // Initialize SONA learning on startup
 initSONA({ adaptationRate: 0.15 });
 
+// Initialize Q-Learning router
+initRouter();
+
+// Initialize ReasoningBank
+initReasoningBank();
+
 // Rebuild vector index from storage on startup
 (async () => {
   try {
@@ -129,6 +143,8 @@ const server = new Server(
   {
     capabilities: {
       tools: {},
+      resources: {},
+      prompts: {},
     },
   }
 );
@@ -208,9 +224,9 @@ Examples:
         text: query,
         limit,
         minQuality,
-        source: source && source !== 'all' ? source as any : undefined,
-        layoutType: layoutType as any,
-        framework: framework as any,
+        source: coerceSource(source),
+        layoutType: coerceLayout(layoutType),
+        framework: coerceFramework(framework),
       };
 
       try {
@@ -311,12 +327,10 @@ Examples:
       const sourcesArg = z.string().optional().parse(args.sources) ?? 'all';
 
       try {
-        const sourceList = sourcesArg === 'all'
-          ? ['pinterest', 'dribbble', 'behance', 'figma-community']
-          : sourcesArg.split(',').map(s => s.trim());
+        const sourceList = coerceSourceList(sourcesArg);
 
         const results = await Promise.all(
-          sourceList.map(source => scoutSource(source as any, query))
+          sourceList.map(source => scoutSource(source, query))
         );
 
         const allSubmissions = results.flatMap(r => r.submissions);
@@ -391,7 +405,7 @@ Use this after discover_patterns to save interesting patterns permanently.`,
       required: ['source', 'url', 'title'],
     },
     handler: async (args) => {
-      const source = z.string().parse(args.source) as any;
+      const source = coerceSource(z.string().parse(args.source)) ?? 'manual';
       const url = z.string().url().parse(args.url);
       const title = z.string().min(1).parse(args.title);
       const description = z.string().optional().parse(args.description) ?? '';
@@ -590,6 +604,10 @@ A higher rating teaches the system that similar patterns should be ranked higher
         // Trigger SONA learning
         const pattern = await getPattern(id);
         await learnFromFeedback(id, rating, pattern?.tags ?? []);
+
+        // Record outcome for Q-learning router
+        const { recordOutcome } = await import('../src/swarm/router.js');
+        recordOutcome('rate', [pattern?.source ?? 'manual'], 'medium', ['quality-gate'], 'star', rating / 5);
 
         return {
           content: [{
@@ -850,6 +868,93 @@ Describes what kind of pattern would work well and suggests related patterns fro
 // ============================================================
 // Register handlers
 // ============================================================
+
+// Resource handlers
+try {
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    resources: [
+      { uri: 'dpm://catalog', name: 'Pattern Catalog', description: 'Complete catalog of all design patterns', mimeType: 'application/json' },
+      { uri: 'dpm://stats', name: 'Library Statistics', description: 'Statistics about the design pattern library', mimeType: 'application/json' },
+    ],
+  }));
+} catch (e: any) {
+  console.error('[dpm] Failed to register list resources handler:', e.message);
+}
+
+try {
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+    resourceTemplates: [
+      { uriTemplate: 'dpm://patterns/{id}', name: 'Get Pattern by ID', description: 'Retrieve a specific design pattern', mimeType: 'application/json' },
+    ],
+  }));
+} catch (e: any) {
+  console.error('[dpm] Failed to register resource templates handler:', e.message);
+}
+
+try {
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const uri = request.params.uri;
+    const { loadAllPatterns } = await import('../src/storage/local.js');
+
+    if (uri === 'dpm://catalog') {
+      const patterns = await loadAllPatterns();
+      return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({ count: patterns.length, patterns: patterns.slice(0, 50) }, null, 2) }] };
+    }
+    if (uri === 'dpm://stats') {
+      const stats = await getStats();
+      const sonaStats = getSONAStats();
+      return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({ library: stats, learning: sonaStats }, null, 2) }] };
+    }
+    const patternMatch = uri.match(/^dpm:\/\/patterns\/(.+)$/);
+    if (patternMatch) {
+      const pattern = await getPattern(patternMatch[1]);
+      if (!pattern) throw new Error(`Pattern not found: ${patternMatch[1]}`);
+      return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(pattern, null, 2) }] };
+    }
+    throw new Error(`Unknown resource: ${uri}`);
+  });
+} catch (e: any) {
+  console.error('[dpm] Failed to register read resource handler:', e.message);
+}
+
+// Prompt handlers
+try {
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: [
+      { name: 'analyze-design', description: 'Analyze a design submission and extract structured pattern information', arguments: [{ name: 'url', description: 'URL of the design', required: true }, { name: 'title', description: 'Title for the design', required: false }] },
+      { name: 'generate-component', description: 'Generate production-ready frontend code from a design pattern', arguments: [{ name: 'pattern_id', description: 'Pattern ID', required: true }, { name: 'framework', description: 'react or vue', required: false }] },
+      { name: 'search-and-compare', description: 'Search for design patterns and compare options', arguments: [{ name: 'query', description: 'Search query', required: true }] },
+      { name: 'discover-and-save', description: 'Discover new patterns from the internet and save them', arguments: [{ name: 'query', description: 'What to discover', required: true }] },
+      { name: 'audit-pattern-library', description: 'Audit the library for quality and duplicates', arguments: [] },
+    ],
+  }));
+} catch (e: any) {
+  console.error('[dpm] Failed to register list prompts handler:', e.message);
+}
+
+try {
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    const name = request.params.name;
+    const args = request.params.arguments ?? {};
+
+    const promptTemplates: Record<string, (a: Record<string, string | undefined>) => string> = {
+      'analyze-design': (a) => `Analyze the design at ${a.url}${a.title ? ` titled "${a.title}"` : ''}. Identify layout type, UI components, color palette, typography, and rate quality 1-10.`,
+      'generate-component': (a) => `Generate production-ready ${a.framework || 'React'} components from design pattern ${a.pattern_id}. Use Tailwind CSS and TypeScript.`,
+      'search-and-compare': (a) => `Search for design patterns matching "${a.query}" and compare the top results side by side.`,
+      'discover-and-save': (a) => `Discover design patterns for "${a.query}" from all sources. Save the top 3-5 to the library.`,
+      'audit-pattern-library': () => `Audit the design pattern library for quality, consistency, and duplicates. Report findings.`,
+    };
+
+    const template = promptTemplates[name];
+    if (!template) throw new Error(`Unknown prompt: ${name}`);
+
+    return {
+      messages: [{ role: 'user', content: { type: 'text', text: template(args as Record<string, string | undefined>) } }],
+    };
+  });
+} catch (e: any) {
+  console.error('[dpm] Failed to register get prompt handler:', e.message);
+}
 
 try {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({

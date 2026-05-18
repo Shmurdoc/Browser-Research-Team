@@ -1,32 +1,34 @@
 // ============================================================
-// Quality Gate Agent — Pattern Quality Scoring
+// Quality Gate Agent — Pattern Quality Scoring with Consensus
 // ============================================================
 //
 // Evaluates pattern quality on 0-10 scale based on:
 // - Completeness (does it have all required fields?)
 // - Consistency (do layout/components/tags agree?)
 // - Source reliability
+// - Consensus voting from multiple assessment agents
 // ============================================================
 
-import { type DesignPattern, type QualityScore } from '../../types.js';
+import { type DesignPattern, type QualityScore, type ComponentType } from '../../types.js';
 import { createLogger_Scoped } from '../../logging/index.js';
 import { predictQuality } from '../../memory/sona.js';
+import { reachConsensus, updateTrust } from '../../consensus/weighted-vote.js';
 
 const logger = createLogger_Scoped('quality-gate');
 
 export interface QualityAssessment {
   score: QualityScore;
   breakdown: {
-    completeness: number;   // 0-10
-    consistency: number;    // 0-10
-    relevance: number;      // 0-10
-    sourceTrust: number;    // 0-10
+    completeness: number;
+    consistency: number;
+    relevance: number;
+    sourceTrust: number;
   };
   issues: string[];
   suggestions: string[];
+  consensusReached: boolean;
 }
 
-/** SOURCE_TRUST: how reliable each source is */
 const SOURCE_TRUST: Record<string, number> = {
   'pinterest': 6,
   'dribbble': 7,
@@ -37,12 +39,11 @@ const SOURCE_TRUST: Record<string, number> = {
   'api': 7,
 };
 
-/** Minimum viable fields for a complete pattern */
 const REQUIRED_FIELDS = [
   'id', 'source', 'url', 'title', 'layout', 'colors', 'components',
 ];
 
-/** Assess pattern quality */
+/** Assess pattern quality with consensus voting */
 export async function assessQuality(pattern: DesignPattern): Promise<QualityAssessment> {
   logger.debug({ patternId: pattern.id, source: pattern.source }, 'Assessing pattern quality');
 
@@ -52,7 +53,9 @@ export async function assessQuality(pattern: DesignPattern): Promise<QualityAsse
   // 1. Completeness score
   let completenessScore = 10;
   for (const field of REQUIRED_FIELDS) {
-    if (!(pattern as any)[field]) {
+    // Check if the field exists and is not empty/falsy
+    const fieldValue = (pattern as unknown as Record<string, unknown>)[field];
+    if (!fieldValue || (typeof fieldValue === 'string' && fieldValue.trim() === '')) {
       completenessScore -= 1.5;
       issues.push(`Missing required field: ${field}`);
     }
@@ -70,17 +73,21 @@ export async function assessQuality(pattern: DesignPattern): Promise<QualityAsse
 
   if (pattern.components.length === 0) {
     completenessScore -= 1;
-    suggestions.push('No UI components detected — consider adding component classification');
+    suggestions.push('No UI components detected');
   }
 
-  completenessScore = Math.max(0, completenessScore);
+  // Bonus for having image data
+  if (pattern.imageUrl && pattern.imageUrl.length > 0) {
+    completenessScore += 0.5;
+  }
+
+  completenessScore = Math.max(0, Math.min(10, completenessScore));
   logger.debug({ completenessScore }, 'Completeness assessment done');
 
   // 2. Consistency score
   let consistencyScore = 10;
 
-  // Check if components align with layout type
-  const layoutComponentMap: Record<string, string[]> = {
+  const layoutComponentMap: Record<string, ComponentType[]> = {
     'dashboard': ['navbar', 'sidebar', 'card', 'chart', 'datatable'],
     'landing-page': ['navbar', 'hero-section', 'feature-grid', 'footer', 'cta-section'],
     'hero-section': ['button', 'navbar'],
@@ -93,7 +100,11 @@ export async function assessQuality(pattern: DesignPattern): Promise<QualityAsse
 
   const expectedComponents = layoutComponentMap[pattern.layout.type] ?? [];
   if (expectedComponents.length > 0) {
-    const hasExpected = expectedComponents.filter(c => pattern.components.includes(c as any));
+    // Filter components that are actually in the pattern's component list
+    const hasExpected = expectedComponents.filter(c => {
+      // c is already a ComponentType, pattern.components is ComponentType[]
+      return pattern.components.includes(c);
+    });
     const matchRatio = hasExpected.length / expectedComponents.length;
     if (matchRatio < 0.3) {
       consistencyScore -= 2;
@@ -104,24 +115,48 @@ export async function assessQuality(pattern: DesignPattern): Promise<QualityAsse
     }
   }
 
-  // Check color palette completeness
   const colorKeys = ['primary', 'secondary', 'accent', 'neutral', 'background', 'text'] as const;
-  const missingColors = colorKeys.filter(k => !(pattern.colors as any)[k]);
+  const patternColors = pattern.colors as unknown as Record<string, string>;
+  const missingColors = colorKeys.filter(k => !patternColors[k] || patternColors[k].trim() === '');
   if (missingColors.length > 0) {
     consistencyScore -= 0.5 * missingColors.length;
-    suggestions.push(`Missing color definitions: ${missingColors.join(', ')}`);
+    suggestions.push(`Missing color definition: ${missingColors.join(', ')}`);
   }
 
-  consistencyScore = Math.max(0, consistencyScore);
+  consistencyScore = Math.max(0, Math.min(10, consistencyScore));
   logger.debug({ consistencyScore }, 'Consistency assessment done');
 
-  // 3. Relevance score
+  // 3. Relevance score from SONA
   const sonaPrediction = predictQuality(pattern);
   const relevanceScore = sonaPrediction;
   logger.debug({ relevanceScore }, 'Relevance assessment done');
 
   // 4. Source trust score
   const sourceTrust = SOURCE_TRUST[pattern.source] ?? 5;
+
+  // 5. Consensus voting — agents vote on quality assessment
+  const votes = [
+    { agentId: 'completeness-agent', value: completenessScore >= 6, confidence: completenessScore / 10, evidence: `Completeness: ${completenessScore}/10` },
+    { agentId: 'consistency-agent', value: consistencyScore >= 6, confidence: consistencyScore / 10, evidence: `Consistency: ${consistencyScore}/10` },
+    { agentId: 'relevance-agent', value: relevanceScore >= 5, confidence: relevanceScore / 10, evidence: `Relevance: ${relevanceScore}/10` },
+    { agentId: 'source-trust-agent', value: sourceTrust >= 5, confidence: sourceTrust / 10, evidence: `Source trust: ${sourceTrust}/10` },
+  ];
+
+  const consensus = await reachConsensus(votes, { minVotes: 3 });
+
+  // Update trust based on consensus outcome
+  for (const vote of votes) {
+    const agreedWithConsensus =
+      (consensus.decision === 'accepted' && vote.value) ||
+      (consensus.decision === 'rejected' && !vote.value);
+    updateTrust(vote.agentId, agreedWithConsensus);
+  }
+
+  const consensusReached = consensus.decision === 'accepted';
+  logger.debug(
+    { decision: consensus.decision, agreementRatio: consensus.agreementRatio },
+    'Consensus voting completed'
+  );
 
   // Overall score (weighted)
   const score = Math.round(
@@ -141,6 +176,7 @@ export async function assessQuality(pattern: DesignPattern): Promise<QualityAsse
       consistency: consistencyScore,
       relevance: relevanceScore,
       sourceTrust,
+      consensusReached,
       issues: issues.length,
       suggestions: suggestions.length,
     },
@@ -157,6 +193,7 @@ export async function assessQuality(pattern: DesignPattern): Promise<QualityAsse
     },
     issues,
     suggestions,
+    consensusReached,
   };
 }
 

@@ -27,6 +27,7 @@ import cors from 'cors';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 
 import {
   searchPatterns,
@@ -55,6 +56,7 @@ import {
 } from '../index.js';
 import { getRateLimiter } from '../utils/rate-limiter.js';
 import { validateURL } from '../validation/url.js';
+import { exportMetrics } from '../logging/metrics.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..', '..', '..');
@@ -65,6 +67,61 @@ const PORT = parseInt(process.env.DPM_WEB_PORT ?? '3000', 10);
 const HOST = process.env.DPM_WEB_HOST ?? '127.0.0.1';
 const WEB_API_KEY = process.env.DPM_WEB_KEY;
 const ALLOWED_ORIGINS = process.env.DPM_ALLOWED_ORIGINS?.split(',').filter(Boolean) ?? [];
+
+// ============================================================
+// Rate Limiting Middleware Setup
+// ============================================================
+
+// Global DDoS rate limiter (per IP): 100 requests per 15 minutes
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+  skip: (req) => {
+    // Skip rate limiting for health checks
+    return req.path === '/health' || req.path === '/ready';
+  },
+});
+
+// API-specific stricter rate limiter: 30 requests per 15 minutes
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // 30 requests per window
+  message: 'Too many API requests, please try again later.',
+  standardHeaders: true,
+  keyGenerator: (req) => {
+    // Use API key if present (authenticated users), otherwise IP
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      return `api-key:${authHeader.slice(7).slice(0, 16)}`;
+    }
+    return req.ip ?? req.socket.remoteAddress ?? 'unknown';
+  },
+});
+
+// Scout endpoint specific rate limiter (expensive operation): 10 requests per hour
+const scoutLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // 10 scout requests per hour
+  message: 'Too many scout requests, please try again later.',
+  standardHeaders: true,
+});
+
+const rateLimiter = getRateLimiter({
+  maxTokens: parseInt(process.env.DPM_RATE_LIMIT_PER_MINUTE ?? '100'),
+  refillRate: parseInt(process.env.DPM_RATE_LIMIT_PER_MINUTE ?? '100') / 60,
+});
+
+function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const clientIp = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+  if (!rateLimiter.isAllowed(`web:${clientIp}`)) {
+    res.set('Retry-After', '60');
+    res.status(429).json({ error: 'Rate limit exceeded. Try again later.' });
+    return;
+  }
+  next();
+}
 
 // ============================================================
 // Middleware
@@ -103,6 +160,9 @@ if (ALLOWED_ORIGINS.length > 0) {
 // Body parsing — 1MB limit (not 10MB)
 app.use(express.json({ limit: '1mb' }));
 
+// Apply global DDoS rate limiter to all routes
+app.use(globalLimiter);
+
 // Static files — restricted to known files only, no directory listing
 app.use(express.static(publicDir, {
   dotfiles: 'ignore',
@@ -137,21 +197,6 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
 // ============================================================
 // Rate Limiting Middleware
 // ============================================================
-
-const rateLimiter = getRateLimiter({
-  maxTokens: parseInt(process.env.DPM_RATE_LIMIT_PER_MINUTE ?? '100'),
-  refillRate: parseInt(process.env.DPM_RATE_LIMIT_PER_MINUTE ?? '100') / 60,
-});
-
-function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
-  const clientIp = req.ip ?? req.socket.remoteAddress ?? 'unknown';
-  if (!rateLimiter.isAllowed(`web:${clientIp}`)) {
-    res.set('Retry-After', '60');
-    res.status(429).json({ error: 'Rate limit exceeded. Try again later.' });
-    return;
-  }
-  next();
-}
 
 // ============================================================
 // Request Logging
@@ -296,7 +341,8 @@ app.get('/ready', async (_req: Request, res: Response) => {
 // REST API (auth + rate limit protected)
 // ============================================================
 
-// Apply auth and rate limiting to all /api routes
+// Apply auth, express-rate-limit, and custom rate limiting to all /api routes
+app.use('/api', apiLimiter);
 app.use('/api', requireAuth);
 app.use('/api', rateLimitMiddleware);
 
@@ -469,8 +515,8 @@ app.post('/api/patterns/:id/code', async (req: Request, res: Response) => {
   }
 });
 
-// Scout for patterns
-app.post('/api/scout', async (req: Request, res: Response) => {
+// Scout for patterns (apply stricter rate limiter for expensive operation)
+app.post('/api/scout', scoutLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = scoutSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -578,6 +624,19 @@ app.get('/api/stats', async (req: Request, res: Response) => {
     const message = e instanceof Error ? e.message : 'Internal server error';
     console.error(`[dpm-web] Stats failed: ${message}`);
     res.status(500).json({ error: 'Failed to load stats' });
+  }
+});
+
+// Metrics (no auth required, useful for monitoring dashboards)
+app.get('/metrics', (_req: Request, res: Response) => {
+  try {
+    const metrics = exportMetrics();
+    res.setHeader('Content-Type', 'application/json');
+    res.json(metrics);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'Internal server error';
+    console.error(`[dpm-web] Metrics export failed: ${message}`);
+    res.status(500).json({ error: 'Failed to export metrics' });
   }
 });
 

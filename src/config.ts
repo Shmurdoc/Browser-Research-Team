@@ -31,6 +31,10 @@ const configSchema = z.object({
   playwrightHeadless: z.string().transform(v => v !== 'false').default('true'),
   playwrightTimeoutMs: z.coerce.number().int().min(5000).max(60000).default(15000),
   rateLimitPerMinute: z.coerce.number().int().min(10).max(1000).default(100),
+  dribbbleApiKey: z.string().min(1).optional(),
+  behanceApiKey: z.string().min(1).optional(),
+  figmaAccessToken: z.string().min(1).optional(),
+  enableImageDownload: z.string().transform(v => v !== 'false').default('true'),
 });
 
 const raw = {
@@ -48,6 +52,10 @@ const raw = {
   playwrightHeadless: process.env.PLAYWRIGHT_HEADLESS,
   playwrightTimeoutMs: process.env.PLAYWRIGHT_TIMEOUT_MS,
   rateLimitPerMinute: process.env.DPM_RATE_LIMIT_PER_MINUTE,
+  dribbbleApiKey: process.env.DRIBBBLE_API_KEY,
+  behanceApiKey: process.env.BEHANCE_API_KEY,
+  figmaAccessToken: process.env.FIGMA_ACCESS_TOKEN,
+  enableImageDownload: process.env.DPM_ENABLE_IMAGE_DOWNLOAD,
 };
 
 const parsed = configSchema.safeParse(raw);

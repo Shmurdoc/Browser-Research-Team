@@ -1,0 +1,92 @@
+# ============================================================
+# Design Pattern Multiverse — Deploy to Fly.io
+# ============================================================
+# Triggers on push to main after CI passes.
+# Requires FLY_API_TOKEN secret configured in GitHub.
+# ============================================================
+
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deploy environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Fly.io
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://${{ vars.FLY_APP_NAME }}.fly.dev
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Fly.io CLI
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy to Fly.io
+        run: flyctl deploy --remote-only --build-arg NODE_ENV=production
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Wait for deployment
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          sleep 30
+
+      - name: Health check
+        run: |
+          MAX_RETRIES=10
+          RETRY_COUNT=0
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" https://${{ vars.FLY_APP_NAME }}.fly.dev/health || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "⏳ Health check attempt $RETRY_COUNT/$MAX_RETRIES (status: $STATUS)"
+            sleep 10
+          done
+          echo "❌ Health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+      - name: Run smoke tests
+        run: |
+          BASE_URL="https://${{ vars.FLY_APP_NAME }}.fly.dev"
+
+          echo "Testing /health endpoint..."
+          curl -sf "$BASE_URL/health" | jq . || exit 1
+
+          echo "Testing /ready endpoint..."
+          curl -sf "$BASE_URL/ready" | jq . || exit 1
+
+          echo "Testing /metrics endpoint..."
+          curl -sf "$BASE_URL/metrics" | jq . || exit 1
+
+          echo "✅ All smoke tests passed"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Deployment failed for ${{ github.sha }}"
+          echo "Check logs at: https://fly.io/apps/${{ vars.FLY_APP_NAME }}/logs"

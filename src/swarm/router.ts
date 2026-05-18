@@ -1,10 +1,11 @@
 // ============================================================
-// Q-Learning Router — Dynamic Agent Topology
+// Q-Learning Router — Dynamic Agent Topology with Persistence
 // ============================================================
 //
 // Routes tasks to the optimal agent topology based on task type.
 // Uses a lightweight Q-learning approach: tracks which agent
 // combinations produce the best outcomes and adjusts routing.
+// Persists state to disk so learning survives restarts.
 // ============================================================
 
 import {
@@ -13,6 +14,12 @@ import {
   type PatternQuery,
   type PatternSource,
 } from '../types.js';
+import { getPatternStorageDir } from '../storage/local.js';
+import { createLogger_Scoped } from '../logging/index.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const logger = createLogger_Scoped('router');
 
 interface RouteAction {
   agents: AgentType[];
@@ -20,37 +27,27 @@ interface RouteAction {
 }
 
 interface QState {
-  taskType: string; // e.g. "search", "submit", "interpret"
-  sources: string;  // comma-joined source set
+  taskType: string;
+  sources: string;
   complexity: 'simple' | 'medium' | 'complex';
 }
 
-/** Q-table entry */
 interface QEntry {
   stateKey: string;
   actionKey: string;
-  q: number;        // Q-value
-  visits: number;   // visit count for exploration
+  q: number;
+  visits: number;
 }
 
 let _qTable: QEntry[] = [];
+let _stateLoaded = false;
 const EXPLORATION_RATE = 0.1;
 const LEARNING_RATE = 0.7;
 const DISCOUNT_FACTOR = 0.9;
 
-/** All available agents mapped by capability */
-const AGENT_CAPABILITIES: Record<string, AgentType[]> = {
-  research: ['scout-pinterest', 'scout-dribbble', 'scout-behance', 'scout-figma'],
-  vision: ['vision-layout', 'vision-interpret', 'vision-color', 'vision-typography'],
-  pattern: ['curator', 'code-gen', 'quality-gate'],
-};
-
 /** Default routes per task type */
 const DEFAULT_ROUTES: Record<string, RouteAction> = {
-  search: {
-    agents: ['curator', 'quality-gate'],
-    topology: 'mesh',
-  },
+  search: { agents: ['curator', 'quality-gate'], topology: 'mesh' },
   submit_pinterest: {
     agents: ['scout-pinterest', 'vision-layout', 'vision-interpret', 'vision-color', 'vision-typography', 'curator'],
     topology: 'hierarchy',
@@ -67,19 +64,59 @@ const DEFAULT_ROUTES: Record<string, RouteAction> = {
     agents: ['vision-layout', 'vision-interpret', 'vision-color', 'vision-typography'],
     topology: 'mesh',
   },
-  codegen: {
-    agents: ['code-gen', 'quality-gate'],
-    topology: 'ring',
-  },
-  rate: {
-    agents: ['quality-gate'],
-    topology: 'star',
-  },
+  codegen: { agents: ['code-gen', 'quality-gate'], topology: 'ring' },
+  rate: { agents: ['quality-gate'], topology: 'star' },
 };
+
+function _getStatePath(): string {
+  const storageDir = getPatternStorageDir();
+  return join(storageDir, 'router-state.json');
+}
+
+function _loadState(): void {
+  if (_stateLoaded) return;
+  _stateLoaded = true;
+
+  try {
+    const path = _getStatePath();
+    if (!existsSync(path)) return;
+
+    const raw = readFileSync(path, 'utf-8');
+    const persisted = JSON.parse(raw) as { qTable: QEntry[] };
+
+    if (Array.isArray(persisted.qTable)) {
+      _qTable = persisted.qTable;
+      logger.info({ entries: _qTable.length }, 'Router Q-table loaded from disk');
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn({ error: message }, 'Failed to load router state, starting fresh');
+  }
+}
+
+function _saveState(): void {
+  try {
+    const path = _getStatePath();
+    const storageDir = getPatternStorageDir();
+
+    if (!existsSync(storageDir)) {
+      mkdirSync(storageDir, { recursive: true });
+    }
+
+    writeFileSync(path, JSON.stringify({ qTable: _qTable }, null, 2), 'utf-8');
+  } catch (error) {
+    logger.warn({ error: error instanceof Error ? error.message : String(error) }, 'Failed to save router state');
+  }
+}
 
 // ============================================================
 // Public API
 // ============================================================
+
+/** Initialize router — loads persisted Q-table */
+export function initRouter(): void {
+  _loadState();
+}
 
 /** Get the optimal route for a given task */
 export function getRoute(
@@ -87,35 +124,31 @@ export function getRoute(
   sources?: PatternSource[],
   complexity: 'simple' | 'medium' | 'complex' = 'medium'
 ): RouteAction {
-  const state: QState = {
-    taskType,
-    sources: sources?.sort().join(',') ?? '',
-    complexity,
-  };
+  _loadState();
 
+  const state: QState = { taskType, sources: sources?.sort().join(',') ?? '', complexity };
   const stateKey = encodeState(state);
 
-  // Try to find best Q-value action
   const relevantEntries = _qTable.filter(e => e.stateKey === stateKey);
   if (relevantEntries.length > 0 && Math.random() > EXPLORATION_RATE) {
-    // Exploit: pick best known action
     const best = relevantEntries.reduce((a, b) => a.q > b.q ? a : b);
     return parseActionKey(best.actionKey);
   }
 
-  // Explore or no data: use default route
   return getDefaultRoute(taskType, sources);
 }
 
-/** Record the outcome of a route choice (reward) */
+/** Record the outcome of a route choice (updates Q-table and persists) */
 export function recordOutcome(
   taskType: string,
   sources: PatternSource[] | undefined,
   complexity: 'simple' | 'medium' | 'complex',
   agents: AgentType[],
   topology: SwarmTopology,
-  reward: number // 0-1 (e.g. qualityScore/10)
+  reward: number
 ): void {
+  _loadState();
+
   const state: QState = { taskType, sources: sources?.sort().join(',') ?? '', complexity };
   const stateKey = encodeState(state);
   const actionKey = encodeAction({ agents, topology });
@@ -123,11 +156,8 @@ export function recordOutcome(
   const existing = _qTable.find(e => e.stateKey === stateKey && e.actionKey === actionKey);
 
   if (existing) {
-    // Q-learning update
     const maxFutureQ = Math.max(
-      ..._qTable
-        .filter(e => e.stateKey === stateKey)
-        .map(e => e.q),
+      ..._qTable.filter(e => e.stateKey === stateKey).map(e => e.q),
       0
     );
     existing.q += LEARNING_RATE * (reward + DISCOUNT_FACTOR * maxFutureQ - existing.q);
@@ -141,6 +171,9 @@ export function recordOutcome(
     _qTable.sort((a, b) => b.visits - a.visits);
     _qTable = _qTable.slice(0, 500);
   }
+
+  _saveState();
+  logger.debug({ taskType, reward, visits: _qTable.length }, 'Q-table updated');
 }
 
 /** Get Q-table size */
@@ -151,6 +184,14 @@ export function qTableSize(): number {
 /** Get all default routes */
 export function getDefaultRoutes(): Record<string, RouteAction> {
   return { ...DEFAULT_ROUTES };
+}
+
+/** Get router stats for diagnostics */
+export function getRouterStats(): { entries: number; totalVisits: number } {
+  return {
+    entries: _qTable.length,
+    totalVisits: _qTable.reduce((sum, e) => sum + e.visits, 0),
+  };
 }
 
 // ============================================================
@@ -175,10 +216,8 @@ function parseActionKey(key: string): RouteAction {
 }
 
 function getDefaultRoute(taskType: string, sources?: PatternSource[]): RouteAction {
-  // Try exact match
   if (DEFAULT_ROUTES[taskType]) return DEFAULT_ROUTES[taskType];
 
-  // Try source-based
   if (sources && sources.length > 0) {
     for (const s of sources) {
       const key = `submit_${s}`;
@@ -186,6 +225,5 @@ function getDefaultRoute(taskType: string, sources?: PatternSource[]): RouteActi
     }
   }
 
-  // Fallback
   return DEFAULT_ROUTES.submit_general;
 }

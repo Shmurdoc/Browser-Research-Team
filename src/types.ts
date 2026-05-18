@@ -210,6 +210,7 @@ export interface PatternSubmission {
   imageUrl?: string;
   description?: string;
   tags?: string[];
+  imageHash?: string; // Hash of processed image, if downloaded
 }
 
 /** Code generation request */

@@ -1,10 +1,16 @@
 # ============================================================
 # Design Pattern Multiverse — Production Dockerfile
 # ============================================================
-# Multi-stage build: build in Node 20, run in slim image.
-# No dev dependencies, no source code, no tests in production.
+# Multi-stage build with security hardening:
+# - Non-root user
+# - Minimal attack surface
+# - Health checks
+# - Read-only filesystem where possible
 # ============================================================
 
+# ============================================================
+# Stage 1: Build
+# ============================================================
 FROM node:22-alpine AS builder
 
 WORKDIR /app
@@ -20,14 +26,11 @@ COPY cli/ ./cli/
 RUN npm run build
 
 # ============================================================
-# Production image
+# Stage 2: Production
 # ============================================================
-
 FROM node:22-alpine AS production
 
-WORKDIR /app
-
-# Install Playwright dependencies for Chromium
+# Install only required system dependencies
 RUN apk add --no-cache \
   chromium \
   nss \
@@ -35,33 +38,45 @@ RUN apk add --no-cache \
   harfbuzz \
   ca-certificates \
   ttf-freefont \
-  tini
+  tini \
+  curl \
+  && rm -rf /var/cache/apk/*
 
 # Create non-root user
 RUN addgroup -g 1001 -S appgroup && \
   adduser -u 1001 -S appuser -G appgroup
 
+WORKDIR /app
+
 # Copy production dependencies only
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts
+RUN npm ci --omit=dev --ignore-scripts && \
+  npm cache clean --force
 
 # Copy built application
 COPY --from=builder /app/dist ./dist
 
-# Create storage directory
-RUN mkdir -p /app/patterns && chown -R appuser:appgroup /app
+# Create required directories with proper ownership
+RUN mkdir -p /app/patterns /app/logs /app/images && \
+  chown -R appuser:appgroup /app
 
 USER appuser
 
-# Set Playwright to use system Chromium
+# Environment
 ENV PLAYWRIGHT_CHROMIUM_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 ENV PLAYWRIGHT_BROWSERS_PATH=0
 ENV NODE_ENV=production
+ENV DPM_STORAGE_DIR=/app/patterns
+ENV DPM_LOG_DIR=/app/logs
 
-EXPOSE 3000
+EXPOSE 3000 3100
 
-# Use tini as init system for proper signal handling
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:3100/health || curl -f http://localhost:3000/health || exit 1
+
+# Use tini for proper signal handling
 ENTRYPOINT ["tini", "--"]
 
 # Default: run web server

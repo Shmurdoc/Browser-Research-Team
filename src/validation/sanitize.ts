@@ -163,3 +163,48 @@ export function sanitizeObject<T extends Record<string, unknown>>(
 
   return result as T;
 }
+
+/**
+ * Sanitize input to prevent prompt injection attacks against LLM calls.
+ * Detects and neutralizes common prompt injection patterns.
+ */
+export function sanitizePromptInjection(input: string): string {
+  if (!input) return '';
+
+  // Length limit
+  if (input.length > 50000) {
+    input = input.slice(0, 50000);
+  }
+
+  // Remove common prompt injection patterns
+  const injectionPatterns = [
+    /ignore\s+(all\s+)?(previous\s+)?instructions?/gi,
+    /ignore\s+(all\s+)?(above\s+)?rules?/gi,
+    /you\s+are\s+now\s+/gi,
+    /system\s*:\s*/gi,
+    /\[system\]/gi,
+    /\[\/system\]/gi,
+    /<\|system\|>/gi,
+    /<\|\/system\|>/gi,
+    /assistant\s*:\s*/gi,
+    /user\s*:\s*/gi,
+    /human\s*:\s*/gi,
+    /ai\s*:\s*/gi,
+    /###\s*instruction/gi,
+    /###\s*response/gi,
+    /###\s*end/gi,
+    /\n\s*---\s*\n/g,
+    /disregard\s+(all\s+)?(previous\s+)?/gi,
+    /forget\s+(all\s+)?(previous\s+)?/gi,
+    /override\s+(all\s+)?(previous\s+)?/gi,
+    /bypass\s+(all\s+)?(security\s+)?/gi,
+    /do\s+not\s+follow\s+(any\s+)?(previous\s+)?/gi,
+  ];
+
+  let result = input;
+  for (const pattern of injectionPatterns) {
+    result = result.replace(pattern, '[FILTERED]');
+  }
+
+  return result;
+}

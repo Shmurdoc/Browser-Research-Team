@@ -11,6 +11,8 @@ import { type PatternSource, type PatternSubmission, type PatternId } from '../.
 import { ScoutError } from '../../errors/index.js';
 import { retry, type RetryConfig } from '../../utils/retry.js';
 import { createLogger_Scoped } from '../../logging/index.js';
+import { recordError, recordSourceMetric, recordLatency } from '../../logging/metrics.js';
+import { validateScoutSubmissions } from '../../validation/scout-submission.js';
 import { scoutPinterest } from './pinterest.js';
 import { scoutDribbble } from './dribbble.js';
 import { scoutBehance } from './behance.js';
@@ -69,10 +71,45 @@ export async function scoutAll(query: string): Promise<ScoutResult[]> {
     };
   });
 
-  const totalSubmissions = scoutResults.reduce((sum, r) => sum + r.submissions.length, 0);
-  logger.info({ total: totalSubmissions, sources: scoutResults.length }, 'All scouts completed');
+  // Validate all submissions
+  const validatedResults = scoutResults.map(result => {
+    const { valid, invalid } = validateScoutSubmissions(result.submissions);
+    
+    if (invalid.length > 0) {
+      logger.warn(
+        { source: result.source, filtered: invalid.length, kept: valid.length },
+        `Filtered out invalid submissions from ${result.source}`
+      );
+    }
 
-  return scoutResults;
+    // Record metrics
+    recordSourceMetric(result.source, {
+      success: result.errors.length === 0,
+      responseTimeMs: result.tookMs,
+      submissionCount: valid.length,
+      filteredCount: invalid.length,
+    });
+
+    if (result.errors.length > 0) {
+      for (const error of result.errors) {
+        recordError(error, { source: result.source, operation: 'scout' });
+      }
+    }
+
+    return {
+      ...result,
+      submissions: valid,
+      errors: [
+        ...result.errors,
+        ...invalid.map(inv => `Submission validation failed: ${inv.errors.join('; ')}`),
+      ],
+    };
+  });
+
+  const totalSubmissions = validatedResults.reduce((sum, r) => sum + r.submissions.length, 0);
+  logger.info({ total: totalSubmissions, sources: validatedResults.length }, 'All scouts completed');
+
+  return validatedResults;
 }
 
 /**

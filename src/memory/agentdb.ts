@@ -27,6 +27,10 @@ const logger = createLogger_Scoped('agentdb');
 const QUALITY_WEIGHT = 0.3;
 const SIMILARITY_WEIGHT = 1 - QUALITY_WEIGHT;
 
+// LRU eviction settings
+const MAX_VECTORS = 5000;
+const EVICTION_THRESHOLD = 0.2; // Evict oldest 20% when threshold exceeded
+
 /** Internal vector entry */
 interface VectorEntry {
   id: PatternId;
@@ -36,6 +40,7 @@ interface VectorEntry {
     source: string;
     layoutType: string;
   };
+  lastAccessTime: number; // For LRU tracking
 }
 
 let _vectors: VectorEntry[] = [];
@@ -169,13 +174,28 @@ function hashString(s: string): number {
 // Public API
 // ============================================================
 
-/** Index a pattern into vector memory */
+/** Index a pattern into vector memory with LRU eviction */
 export async function indexPattern(pattern: DesignPattern): Promise<void> {
   const embedding = await generateEmbedding(pattern);
   const normalized = normalize(embedding);
 
+  // Remove existing entry if present
   _vectors = _vectors.filter(v => v.id !== pattern.id);
 
+  // Evict oldest entries if we exceed MAX_VECTORS
+  if (_vectors.length >= MAX_VECTORS) {
+    const toEvict = Math.floor(MAX_VECTORS * EVICTION_THRESHOLD);
+    // Sort by lastAccessTime (oldest first)
+    _vectors.sort((a, b) => a.lastAccessTime - b.lastAccessTime);
+    // Remove oldest entries
+    _vectors = _vectors.slice(toEvict);
+
+    logger.debug(
+      `Evicted ${toEvict} old vectors to stay under limit (remaining: ${_vectors.length}/${MAX_VECTORS})`
+    );
+  }
+
+  // Add new vector with current timestamp
   _vectors.push({
     id: pattern.id,
     embedding: normalized,
@@ -184,6 +204,7 @@ export async function indexPattern(pattern: DesignPattern): Promise<void> {
       source: pattern.source,
       layoutType: pattern.layout.type,
     },
+    lastAccessTime: Date.now(),
   });
   _dirty = true;
 }
@@ -197,6 +218,7 @@ export async function removeFromIndex(id: PatternId): Promise<void> {
 /**
  * Search vector memory by text query.
  * O(n) — pre-computes all scores before sorting (no O(n²) lookups).
+ * Updates access times for LRU tracking.
  */
 export async function searchVectors(
   queryText: string,
@@ -219,9 +241,13 @@ export async function searchVectors(
   }
 
   const normalizedQuery = normalize(queryEmbedding);
+  const now = Date.now();
 
   // Pre-compute all scores in a single pass — O(n), not O(n²)
   const scored = _vectors.map(v => {
+    // Update access time for LRU tracking
+    v.lastAccessTime = now;
+
     const similarity = cosineSimilarity(Array.from(normalizedQuery), Array.from(v.embedding));
     const qualityComponent = (v.metadata.qualityScore / 10) * QUALITY_WEIGHT;
     const finalScore = similarity * SIMILARITY_WEIGHT + qualityComponent;
@@ -263,6 +289,26 @@ export async function rebuildIndex(patterns: DesignPattern[]): Promise<void> {
 /** Get vector index size */
 export function indexSize(): number {
   return _vectors.length;
+}
+
+/** Get vector memory stats */
+export function getMemoryStats(): {
+  vectorCount: number;
+  maxVectors: number;
+  utilizationPercent: number;
+  estimatedMemoryMB: number;
+} {
+  // Rough estimate: each vector is 128 floats * 8 bytes + metadata
+  const estimatedBytesPerVector = 128 * 8 + 100;
+  const estimatedMemoryBytes = _vectors.length * estimatedBytesPerVector;
+  const estimatedMemoryMB = estimatedMemoryBytes / (1024 * 1024);
+
+  return {
+    vectorCount: _vectors.length,
+    maxVectors: MAX_VECTORS,
+    utilizationPercent: Math.round((_vectors.length / MAX_VECTORS) * 100),
+    estimatedMemoryMB: Math.round(estimatedMemoryMB * 10) / 10,
+  };
 }
 
 /** Check if real embedding model is loaded */

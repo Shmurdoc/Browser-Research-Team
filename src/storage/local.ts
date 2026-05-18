@@ -13,6 +13,7 @@
 import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { existsSync, renameSync, unlinkSync, mkdirSync } from 'node:fs';
+import * as lockModule from 'proper-lockfile';
 import {
   type DesignPattern,
   type PatternId,
@@ -25,6 +26,9 @@ import {
 } from '../types.js';
 import { StorageError } from '../errors/index.js';
 import { safeBasename } from '../validation/sanitize.js';
+
+// Use the lock function from proper-lockfile
+const lock = lockModule.lock;
 
 const TMP_SUFFIX = '.tmp';
 
@@ -145,38 +149,71 @@ async function loadIndex(): Promise<PatternIndex> {
 }
 
 /**
- * Persist index to disk with atomic write (write to temp, then rename).
- * Uses a write lock to prevent concurrent write race conditions.
+ * Persist index to disk with atomic write and proper file locking.
+ * Uses proper-lockfile for cross-platform file locking (Windows + Unix).
+ * Uses a write lock queue to prevent concurrent write race conditions.
  */
 async function persist(): Promise<void> {
   if (!_cache) return;
 
   // Queue this write behind any previous writes
   _writeLock = _writeLock.then(async () => {
+    let release: (() => Promise<void>) | null = null;
     try {
       const indexFile = getIndexFile();
       const tmpFile = indexFile + TMP_SUFFIX;
-      _cache!.lastUpdated = Date.now();
       await ensureDir();
 
+      // Ensure index file exists before locking (proper-lockfile requires existing file or directory)
+      try {
+        if (!existsSync(indexFile)) {
+          // Create empty index file so lock can work
+          await writeFile(indexFile, '{}', 'utf-8');
+        }
+      } catch {
+        // Ignore — file may have been created by another process
+      }
+
+      // Acquire file lock with timeout
+      release = await lock(indexFile, {
+        stale: 5000, // Consider lock stale after 5s (in case process crashes)
+        onCompromised: (error: Error) => {
+          throw new StorageError(`Lock compromised: ${error instanceof Error ? error.message : String(error)}`, {
+            path: indexFile,
+          });
+        },
+      });
+
+      _cache!.lastUpdated = Date.now();
       const jsonContent = JSON.stringify(_cache!, null, 2);
 
       try {
+        // Write to temp file first
         await writeFile(tmpFile, jsonContent, 'utf-8');
-        // Try rename first (fast, atomic on Unix)
+
+        // Atomic rename (Unix) or fallback for Windows
         try {
           renameSync(tmpFile, indexFile);
-        } catch {
-          // Fallback for Windows: if rename fails, direct write
+        } catch (renameError) {
+          // Windows fallback: direct write + cleanup
           try {
             await writeFile(indexFile, jsonContent, 'utf-8');
-            try { unlinkSync(tmpFile); } catch { /* cleanup best-effort */ }
           } catch {
-            throw new Error('Failed to persist index on Windows fallback');
+            throw new StorageError(
+              `Failed to write index file: ${renameError instanceof Error ? renameError.message : String(renameError)}`,
+              { path: indexFile }
+            );
           }
         }
+
+        // Clean up temp file if it still exists
+        try {
+          unlinkSync(tmpFile);
+        } catch {
+          // Best effort cleanup — ignore if already deleted
+        }
       } catch (error) {
-        // Clean up temp file
+        // Clean up temp file on error
         try {
           await unlink(tmpFile);
         } catch {
@@ -189,6 +226,15 @@ async function persist(): Promise<void> {
         `Failed to persist index: ${error instanceof Error ? error.message : String(error)}`,
         { path: getIndexFile() }
       );
+    } finally {
+      // Always release the lock
+      if (release) {
+        try {
+          await release();
+        } catch (releaseError) {
+          console.warn(`Failed to release file lock: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`);
+        }
+      }
     }
   });
 

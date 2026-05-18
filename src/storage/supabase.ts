@@ -98,7 +98,7 @@ export async function putPattern(pattern: DesignPattern): Promise<boolean> {
     }
 
     // If insert fails, try update
-    const updateRes = await fetch(`${SUPABASE_URL}/rest/v1/patterns?id=eq.${pattern.id}`, {
+    const updateRes = await fetch(`${SUPABASE_URL}/rest/v1/patterns?id=eq.${encodeURIComponent(pattern.id)}`, {
       method: 'PATCH',
       headers: {
         'apikey': SUPABASE_KEY,
@@ -129,7 +129,7 @@ export async function getPattern(id: PatternId): Promise<DesignPattern | null> {
   if (cache.has(id)) return cache.get(id) ?? null;
 
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/patterns?id=eq.${id}&select=*`, {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/patterns?id=eq.${encodeURIComponent(id)}&select=*`, {
       headers: {
         'apikey': SUPABASE_KEY,
         'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -153,7 +153,7 @@ export async function deletePattern(id: PatternId): Promise<boolean> {
   if (!hasSupabase()) return false;
 
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/patterns?id=eq.${id}`, {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/patterns?id=eq.${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: {
         'apikey': SUPABASE_KEY,
